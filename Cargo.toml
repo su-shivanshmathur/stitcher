@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members  = ["crates/*"]
+
+[workspace.package]
+edition      = "2021"
+# the plan's floor (code uses LazyLock 1.80+, Option::is_none_or 1.82+, const f64::to_bits 1.83+)
+rust-version = "1.85"
+license      = "Apache-2.0"
+
+# Strict lints (PLAN §20).
+[workspace.lints.rust]
+unsafe_code           = "forbid"
+rust_2018_idioms      = { level = "warn", priority = -1 }
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+as_conversions         = "warn"
+expect_used            = "warn"
+indexing_slicing       = "warn"
+large_futures          = "warn"
+panic                  = "warn"
+panic_in_result_fn     = "warn"
+todo                   = "warn"
+unimplemented          = "warn"
+unreachable            = "warn"
+unwrap_used            = "warn"
+unwrap_in_result       = "warn"
+use_self               = "warn"
+wildcard_dependencies  = "warn"
+# print/eprint are disallowed via clippy.toml (INSPECT.md: structured logging only)
+
+[workspace.dependencies]
+# async / streaming
+tokio        = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+futures      = "0.3"
+tokio-stream = { version = "0.1", features = ["time"] } # StreamExt::chunks_timeout
+
+# kafka (PLAN §9)
+rdkafka      = { version = "0.36", features = ["cmake-build", "ssl", "gssapi-vendored"] }
+
+# stores
+scylla           = "1"      # pure-Rust CQL driver (ScyllaDB + Cassandra)
+rocksdb          = { version = "0.22", features = ["multi-threaded-cf"] }   # bundles RocksDB C++ (needs clang + cmake)
+aws-sdk-dynamodb = "1"      # stub backend only (feature `dynamodb`)
+aws-config       = "1"
+
+# serialization
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+serde_yaml_ng  = "0.10"     # maintained serde_yaml fork (upstream archived)
+serde_path_to_error = "0.1"
+
+# config / cli
+config         = "0.14"
+clap           = { version = "4", features = ["derive"] }
+
+# observability
+tracing              = "0.1"
+tracing-subscriber   = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+prometheus           = "0.13"   # the metrics stack (PLAN decision #22)
+actix-web            = "4"
+
+# errors (PLAN §17: error_stack, NOT anyhow)
+thiserror    = "1"
+error-stack  = "0.4"
+
+# misc
+arc-swap            = "1"
+async-trait         = "0.1"
+time                = { version = "0.3", features = ["parsing", "formatting", "macros"] }
+
+# proc-macro internals
+syn          = { version = "2", features = ["full", "parsing", "printing"] }
+quote        = "1"
+proc-macro2  = "1"
+pest         = "2"
+pest_derive  = "2"
+
+# testing (re-add when the deferred test suite lands: proptest, trybuild)
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+
+# dev-cycle profile: optimized deps, no LTO, keep symbols (PLAN §Workspace Cargo.toml)
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = "none"

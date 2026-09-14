@@ -1,0 +1,8 @@
+# Clippy configuration (workspace-wide).
+# INSPECT.md: structured logging only — no ad-hoc stdout/stderr writes; use `tracing`.
+disallowed-macros = [
+    { path = "std::print", reason = "use structured logging (tracing)" },
+    { path = "std::println", reason = "use structured logging (tracing)" },
+    { path = "std::eprint", reason = "use structured logging (tracing)" },
+    { path = "std::eprintln", reason = "use structured logging (tracing)" },
+]

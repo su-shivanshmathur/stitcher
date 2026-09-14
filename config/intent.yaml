@@ -1,0 +1,64 @@
+# The generic `stitcher` binary's state machine: interpreted at runtime by
+# `stitcher::state` (also consumable by the `schema!` build-time escape hatch).
+aggregate: intent
+version: 3
+id_type: payment_merchant_profile_organization
+primary_key: "{log.payment_id}-{log.merchant_id}-{log.profile_id}-{log.organization_id}"
+decode_filter:
+  require: [log.payment_id, log.merchant_id, log.profile_id, log.organization_id]
+  reject_if_contains: undefined
+  log_type_in: [payment_intent, payment_attempt, refund, dispute]
+  tenant_path: log.tenant_id
+fields:
+  payment_intent:
+    node: latest_by
+    when: "log.log_type == 'payment_intent'"
+    comparator: "parse_time(log.modified_at)"
+    payload: "log"
+  payment_attempt_object:
+    node: keyed_map
+    when: "log.log_type == 'payment_attempt'"
+    key: "meaningful(log.attempt_id)"
+    value:
+      node: latest_by
+      comparator: "parse_time(log.modified_at)"
+      payload: "log"
+  refund_object:
+    node: keyed_map
+    when: "log.log_type == 'refund'"
+    key: "meaningful(log.refund_id)"
+    value:
+      node: latest_by
+      comparator: "parse_time(log.modified_at)"
+      payload: "log"
+  dispute_object:
+    node: keyed_map
+    when: "log.log_type == 'dispute'"
+    key: "meaningful(log.dispute_id)"
+    value:
+      node: latest_by
+      comparator: "parse_time(log.modified_at)"
+      payload: "log"
+  debit_routing_savings:
+    node: last
+    when: "log.log_type == 'payment_attempt'"
+    value: "round(log.debit_routing_savings)"
+  log_count:
+    node: counter
+sinks:
+  - name: intent
+    topic: stitcher-intent-events
+    field: payment_intent
+    key_path: payment_id
+  - name: attempt
+    topic: stitcher-attempt-events
+    field: payment_attempt_object
+    fan_out: true
+  - name: refund
+    topic: stitcher-refund-events
+    field: refund_object
+    fan_out: true
+  - name: dispute
+    topic: stitcher-dispute-events
+    field: dispute_object
+    fan_out: true

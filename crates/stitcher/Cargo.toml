@@ -1,0 +1,53 @@
+[package]
+name = "stitcher"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+stitcher_macro = { path = "../stitcher_macro" }
+stitcher-dsl = { path = "../dsl" }
+
+tokio.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+rdkafka.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+serde_path_to_error.workspace = true
+
+config.workspace = true
+clap.workspace = true
+
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+thiserror.workspace = true
+error-stack.workspace = true
+
+arc-swap.workspace = true
+async-trait.workspace = true
+time.workspace = true
+
+# backends (feature-gated)
+scylla           = { workspace = true, optional = true }
+rocksdb          = { workspace = true, optional = true }
+aws-sdk-dynamodb = { workspace = true, optional = true }
+aws-config       = { workspace = true, optional = true }
+
+# observability: one crates.io stack (PLAN decision #22) —
+# tracing-subscriber logging + prometheus metrics scraped via actix-web
+prometheus         = { workspace = true }
+actix-web          = { workspace = true }
+
+[features]
+default        = ["cql", "rocks"]
+cql            = ["dep:scylla"]
+rocks          = ["dep:rocksdb"]
+dynamodb       = ["dep:aws-sdk-dynamodb", "dep:aws-config"]        # stub backend
+
+[lints]
+workspace = true

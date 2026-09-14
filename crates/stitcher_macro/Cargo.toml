@@ -1,0 +1,20 @@
+[package]
+name = "stitcher_macro"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+serde_yaml_ng.workspace = true
+pest.workspace = true
+stitcher-dsl = { path = "../dsl" }
+
+[lints]
+workspace = true

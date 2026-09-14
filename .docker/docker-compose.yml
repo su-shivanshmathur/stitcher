@@ -1,0 +1,46 @@
+# Local integration environment: redpanda (Kafka API) + scylla (CQL).
+#
+# PROVISIONAL table DDL (PLAN §Open items — confirm against the Cassandra migrations):
+#   PRIMARY KEY ((id_type), id)   → per-type partitions clustered by id.
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.1.1
+    command:
+      - redpanda start
+      - --mode dev-container
+      - --smp 1
+      - --memory 512M
+      - --node-id 0
+      - --check=false
+    ports: ["9092:9092"]
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  scylla:
+    image: scylladb/scylla:6.2
+    ports: ["9042:9042"]
+    command: ["--developer-mode=1"]
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe cluster'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  init:
+    image: scylladb/scylla:6.2
+    depends_on:
+      scylla:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    entrypoint: >
+      cqlsh scylla -e "
+      CREATE KEYSPACE IF NOT EXISTS stitcher
+        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};
+      CREATE TABLE IF NOT EXISTS stitcher.state (
+        id text, id_type text, version bigint, state blob,
+        PRIMARY KEY ((id_type), id));
+      "

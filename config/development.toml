@@ -1,0 +1,67 @@
+# Development defaults. Override per-deployment via --config-path or STITCHER__* env.
+
+[server]
+host = "0.0.0.0"
+port = 9090
+
+[log]
+level = "info"
+format = "json"
+
+[source_kafka]
+brokers = ["localhost:9092"]
+topics = ["consolidated-events"]
+consumer_group = "stitcher"
+extra = { "queued.max.messages.kbytes" = "16384", "partition.assignment.strategy" = "cooperative-sticky" }
+
+[sink_kafka]
+brokers = ["localhost:9092"]
+dlq_topic = "stitcher-dlq"
+extra = { }
+
+[batch]
+count = 100000
+window_ms = 1
+
+[store]
+backend = "cql"
+
+[store.cql]
+hosts = ["localhost"]
+port = 9042
+keyspace = "stitcher"
+table = "state"
+
+[store.rocksdb]
+path = "/tmp/stitcher-rocksdb"
+ttl_secs = 0
+
+# The generic `stitcher` binary's state machine (ignored by domain binaries).
+[state]
+config_file = "config/intent.yaml"
+
+[enrichment]
+config_file = ""
+reload_secs = 43200
+
+[filters.intent]
+topic = "stitcher-intent-events"
+retention_days = 182
+retention_key = "created_at"
+
+[filters.attempt]
+topic = "stitcher-attempt-events"
+retention_days = 182
+retention_key = "created_at"
+
+[filters.refund]
+topic = "stitcher-refund-events"
+retention_days = 182
+retention_key = "created_at"
+
+[filters.dispute]
+topic = "stitcher-dispute-events"
+retention_days = 182
+retention_key = "created_at"
+
+tenant_ids = ["public"]
