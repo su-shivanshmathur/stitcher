@@ -3,11 +3,22 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
+// Entry rule: the expression must consume the whole input. Without the EOI
+// anchor, pest happily returns a prefix match — a path like `log_type` used to
+// truncate at the literal `log` prefix and silently drop the rest of the
+// expression.
+file    = { SOI ~ expr ~ EOI }
 expr    = { term ~ (bin_op ~ term)* }
 term    = { literal | call | path | unary | "(" ~ expr ~ ")" }
 unary   = { "!" ~ term }
 call    = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
-path    = { "log" ~ ("." ~ ident)* }
+// Identifier-rooted path: the record envelope carries fields next to the `log`
+// payload (`log_type`, `tenant_id`, …), so paths are not `log`-prefixed only —
+// same resolution space as the key template / decode-filter paths. Atomic so
+// no whitespace can sneak into the matched span (a non-atomic path retains
+// the space skipped before its zero-width repetition, e.g. `log_type == 'x'`
+// would otherwise capture `"log_type "`).
+path    = @{ ident ~ ("." ~ ident)* }
 literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }

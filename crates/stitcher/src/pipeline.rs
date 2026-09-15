@@ -63,25 +63,27 @@ pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()
     let mut transport_failures: u32 = 0;
 
     while let Some(batch) = StreamExt::next(&mut batches).await {
-        if !guard.begin_batch() {
+        // `_batch` decrements `in_flight` when dropped — every exit path below
+        // (early `?`, shutdown timeout, loop end) releases the rebalance drain.
+        let Some(_batch) = guard.begin_batch() else {
             // Rebalance-revoke while a batch was in flight: the owned, unprocessed records
-            // must NOT be committed (positions skip past them), and with
-            // `commit_consumer_state` we cannot commit only *later* batches without also
-            // covering the dropped one. The replay-safe action is to stop here — the
-            // unprocessed range is re-consumed from the last commit after restart/rejoin.
+            // must NOT be skipped — a later batch's per-partition watermark would cover
+            // them. The replay-safe action is to stop here — the unprocessed range is
+            // re-consumed from the last committed watermark after restart/rejoin.
             tracing::warn!(
                 "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
             );
             break;
-        }
+        };
         let started = Instant::now();
+        // capture the commit watermark before the batch is moved into the work
+        let watermarks = kafka::consumer::batch_watermarks(&batch);
         let work = Box::pin(process_batch(&proc, store.as_ref(), &ctx, batch));
         let result = match shutdown_grace(&settings, *shutdown_req.borrow()) {
             Some(grace) => {
                 if let Ok(r) = tokio::time::timeout(grace, work).await {
                     r
                 } else {
-                    guard.end_batch();
                     return Err(error_stack::report!(StitcherError::ShutdownTimeout))
                         .attach_printable("batch exceeded shutdown_grace_secs");
                 }
@@ -93,9 +95,8 @@ pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()
                                // when a transport error rode along (anything not yet consumed is unaffected).
                                // Dry-run (inspect tap) commits NOTHING — a re-runnable, non-destructive read.
         if !ctx.dry_run {
-            consumer.commit().await?;
+            consumer.commit(&watermarks).await?;
         }
-        guard.end_batch();
         metrics::batch_process_seconds(started.elapsed().as_secs_f64());
         metrics::batches();
 
@@ -120,7 +121,10 @@ pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()
 }
 
 /// Stateless variant (PLAN §18): consume → `transform` → produce → commit. No store.
-pub async fn run_transformer<T: Transformer>(t: T, settings: Settings) -> StitcherResult<()> {
+pub async fn run_transformer<T: Transformer>(
+    transformer: T,
+    settings: Settings,
+) -> StitcherResult<()> {
     metrics::spawn_server(&settings.server.host, settings.server.port)?;
     // A transformer has no state store; the consumer still wants the rebalance hook —
     // hand it the no-op local store.
@@ -137,21 +141,23 @@ pub async fn run_transformer<T: Transformer>(t: T, settings: Settings) -> Stitch
     let mut transport_failures: u32 = 0;
 
     while let Some(batch) = StreamExt::next(&mut batches).await {
-        if !guard.begin_batch() {
+        // `_batch` decrements `in_flight` when dropped (see `run`).
+        let Some(_batch) = guard.begin_batch() else {
             // same replay-safety argument as `run` (see there)
             tracing::warn!(
                 "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
             );
             break;
-        }
+        };
         let started = Instant::now();
+        let watermarks = kafka::consumer::batch_watermarks(&batch);
         // process the GOOD records; report (don't throw) the transport error so the
         // finished records still get produced + committed.
-        let outcome = process_batch_transformer(&t, &producer, &inspector, dry_run, batch).await?;
+        let outcome =
+            process_batch_transformer(&transformer, &producer, &inspector, dry_run, batch).await?;
         if !dry_run {
-            consumer.commit().await?;
+            consumer.commit(&watermarks).await?;
         }
-        guard.end_batch();
         metrics::batch_process_seconds(started.elapsed().as_secs_f64());
         metrics::batches();
 
@@ -325,6 +331,7 @@ async fn process_batch<P: Processor>(
 ) -> StitcherResult<BatchOutcome> {
     // 1. own the payloads (BorrowedMessage can't cross an await)
     let (records, transport_err) = collect_records(batch);
+    tracing::debug!(records = records.len(), "batch received");
     if let Some(lag_secs) = oldest_lag_secs(&records) {
         metrics::end_to_end_lag_seconds(lag_secs);
     }
@@ -345,6 +352,13 @@ async fn process_batch<P: Processor>(
         match decoded {
             Some((key, state)) => {
                 metrics::messages_decoded();
+                tracing::debug!(
+                    key = %key.as_str(),
+                    topic = %rec.topic,
+                    partition = rec.partition,
+                    offset = rec.offset,
+                    "record decoded"
+                );
                 key_partition
                     .entry(key.clone())
                     .or_insert_with(|| PartitionRef {
@@ -367,6 +381,7 @@ async fn process_batch<P: Processor>(
     if !states.is_empty() {
         // 3. stored states (concurrent remote reads inside the backend)
         let keys: Vec<Key> = states.keys().cloned().collect();
+        tracing::debug!(keys = keys.len(), "reading stored states");
         let stored = store.get_many(proc.id_type(), &keys).await?;
 
         // 4. merge + encode deltas; 5. retention filter
@@ -389,6 +404,7 @@ async fn process_batch<P: Processor>(
                 // version ≠ state_version ⇒ absent (PLAN §13)
                 _ => None,
             };
+            let had_stored = stored_state.is_some();
             // (b) inspect: `old` is rendered BEFORE `merge` consumes it (INSPECT.md)
             let old_repr = ctx
                 .inspector
@@ -423,6 +439,12 @@ async fn process_batch<P: Processor>(
                 topic: String::new(),
                 partition: 0,
             });
+            tracing::debug!(
+                key = %key.as_str(),
+                had_stored,
+                blob_bytes = blob.len(),
+                "state merged + serialized"
+            );
             merged_states.push((key, blob, part));
         }
         // (c) inspect: outgoing sink records, pre-retention (everything produced)
@@ -439,6 +461,7 @@ async fn process_batch<P: Processor>(
             // 6. produce first (consumers see deltas only if the state will also persist —
             //    but persist-failure aborts the batch pre-commit, so replay re-produces:
             //    at-least-once everywhere)
+            tracing::debug!(messages = msgs.len(), "producing sink records");
             ctx.producer.send_all(&msgs).await?;
 
             // 7. dual-store persist (concurrent within the batch; concurrent dual-write
@@ -465,7 +488,7 @@ async fn process_batch<P: Processor>(
 
 /// One stateless batch (PLAN §18): transform → produce. No store; the caller commits.
 async fn process_batch_transformer<T: Transformer>(
-    t: &T,
+    transformer: &T,
     producer: &KafkaProducer,
     inspector: &inspect::Inspect,
     dry_run: bool,
@@ -475,7 +498,7 @@ async fn process_batch_transformer<T: Transformer>(
     let mut out: Vec<OutMsg> = Vec::new();
     for rec in &records {
         inspector.incoming(&rec.topic, rec.partition, rec.offset, None, &rec.payload);
-        let msgs = t.transform(&rec.payload);
+        let msgs = transformer.transform(&rec.payload);
         if msgs.is_empty() {
             classify_and_route(producer, rec, dry_run).await?;
         } else {
@@ -503,6 +526,12 @@ async fn classify_and_route(
         && serde_json::from_slice::<serde::de::IgnoredAny>(&rec.payload).is_ok();
     if valid_json {
         metrics::messages_filtered("by_design");
+        tracing::debug!(
+            topic = %rec.topic,
+            partition = rec.partition,
+            offset = rec.offset,
+            "record filtered by design (failed processor admission)"
+        );
     } else {
         metrics::messages_skipped("malformed");
         if dry_run {
@@ -513,6 +542,12 @@ async fn classify_and_route(
                 "malformed record (dry-run: DLQ write skipped)"
             );
         } else {
+            tracing::debug!(
+                topic = %rec.topic,
+                partition = rec.partition,
+                offset = rec.offset,
+                "malformed record routed to DLQ"
+            );
             producer
                 .send_dlq(
                     &rec.topic,

@@ -2,22 +2,28 @@
 # `stitcher::state` (also consumable by the `schema!` build-time escape hatch).
 aggregate: intent
 version: 3
-id_type: payment_merchant_profile_organization
-primary_key: "{log.payment_id}-{log.merchant_id}-{log.profile_id}-{log.organization_id}"
+id_type: payment_merchant
+# The key holes must mirror the `require` alternations: a record admitted via
+# `log.payment_id` must also key via `log.payment_id` (first-present-wins is
+# per hole, so unmatched coverage drops records at keying after passing
+# admission).
+primary_key: "{payment_id|log.payment_id}-{merchant_id|log.merchant_id}"
 decode_filter:
-  require: [log.payment_id, log.merchant_id, log.profile_id, log.organization_id]
+  require: [payment_id|log.payment_id, merchant_id|log.merchant_id]
   reject_if_contains: undefined
+  # the producer's discriminator sits at the top level, next to the `log` payload
   log_type_in: [payment_intent, payment_attempt, refund, dispute]
+  log_type_path: log_type
   tenant_path: log.tenant_id
 fields:
   payment_intent:
     node: latest_by
-    when: "log.log_type == 'payment_intent'"
+    when: "log_type == 'payment_intent'"
     comparator: "parse_time(log.modified_at)"
     payload: "log"
   payment_attempt_object:
     node: keyed_map
-    when: "log.log_type == 'payment_attempt'"
+    when: "log_type == 'payment_attempt'"
     key: "meaningful(log.attempt_id)"
     value:
       node: latest_by
@@ -25,7 +31,7 @@ fields:
       payload: "log"
   refund_object:
     node: keyed_map
-    when: "log.log_type == 'refund'"
+    when: "log_type == 'refund'"
     key: "meaningful(log.refund_id)"
     value:
       node: latest_by
@@ -33,7 +39,7 @@ fields:
       payload: "log"
   dispute_object:
     node: keyed_map
-    when: "log.log_type == 'dispute'"
+    when: "log_type == 'dispute'"
     key: "meaningful(log.dispute_id)"
     value:
       node: latest_by
@@ -41,10 +47,14 @@ fields:
       payload: "log"
   debit_routing_savings:
     node: last
-    when: "log.log_type == 'payment_attempt'"
+    when: "log_type == 'payment_attempt'"
     value: "round(log.debit_routing_savings)"
   log_count:
     node: counter
+  api_event_object:
+    node: keyed_map
+    when: "api_flow == 'PaymentsCreate' || api_flow == 'PaymentsConfirm'"
+    key: "meaningful(log.request_id)"
 sinks:
   - name: intent
     topic: stitcher-intent-events

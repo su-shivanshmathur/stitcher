@@ -189,11 +189,11 @@ pub fn batches() {
 }
 
 /// Records in the batch.
-pub fn batch_size(n: usize) {
+pub fn batch_size(record_count: usize) {
     if let Some(histogram) = &*BATCH_SIZE {
         #[allow(clippy::as_conversions)] // usize count → f64 observation; loss irrelevant
-        let n = n as f64;
-        histogram.with_label_values(&[]).observe(n);
+        let observation = record_count as f64;
+        histogram.with_label_values(&[]).observe(observation);
     }
 }
 

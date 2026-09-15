@@ -1,6 +1,6 @@
 //! The `Store` abstraction + composed local/remote implementation (PLAN §Core abstractions).
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, future::Future, sync::Arc};
 
 use crate::{config, errors::StitcherResult, processor::Key};
 
@@ -63,6 +63,31 @@ pub trait Store: Send + Sync {
 
     /// Flush + release resources on shutdown.
     async fn cleanup(&self) -> StitcherResult<()>;
+}
+
+/// Execute a store operation, *then* log it — one shared site for every backend
+/// (cql, rocksdb, …): the caller's debug line and the duration metric fire only
+/// after the future resolves successfully, so a log line proves the work
+/// finished (a pre-operation log cannot). Failures propagate undecorated; the
+/// backend's error context already names the operation.
+pub(crate) async fn traced<T, F, L>(
+    backend: &'static str,
+    metric: fn(&'static str, f64),
+    log: L,
+    operation: F,
+) -> StitcherResult<T>
+where
+    F: Future<Output = StitcherResult<T>>,
+    L: FnOnce(&T, f64),
+{
+    let started = std::time::Instant::now();
+    let result = operation.await;
+    let elapsed_secs = started.elapsed().as_secs_f64();
+    if let Ok(outcome) = &result {
+        metric(backend, elapsed_secs);
+        log(outcome, elapsed_secs);
+    }
+    result
 }
 
 /// Local-first cache + authoritative remote (PLAN §5: read local-first, write-through both).

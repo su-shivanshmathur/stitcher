@@ -168,14 +168,14 @@ impl Inspect {
 }
 
 /// Recursively replace the values of any object key listed in `fields` with `***`.
-fn redact_value(v: &mut Value, fields: &[String]) {
-    match v {
+fn redact_value(value: &mut Value, fields: &[String]) {
+    match value {
         Value::Object(map) => {
-            for (k, val) in map.iter_mut() {
-                if fields.iter().any(|f| f == k) {
-                    *val = Value::String(MASK.to_string());
+            for (field_name, field_value) in map.iter_mut() {
+                if fields.iter().any(|redacted| redacted == field_name) {
+                    *field_value = Value::String(MASK.to_string());
                 } else {
-                    redact_value(val, fields);
+                    redact_value(field_value, fields);
                 }
             }
         }

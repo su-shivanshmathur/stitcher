@@ -5,7 +5,6 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Instant,
 };
 
 use error_stack::ResultExt;
@@ -105,41 +104,56 @@ impl RocksStore {
     }
 
     async fn get_many_inner(&self, keys: &[Key]) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
-        let started = Instant::now();
-        let db = Arc::clone(&self.db);
-        let cf_names: HashSet<String> = self
-            .known_cfs
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let keys = keys.to_vec();
-        let out = spawn_blocking(move || -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
-            let mut found = HashMap::with_capacity(keys.len());
-            // resolve CF handles once per batch, not per (key, CF) pair
-            let cfs: Vec<_> = cf_names
-                .iter()
-                .filter_map(|name| db.cf_handle(name))
-                .collect();
-            for key in &keys {
-                for cf in &cfs {
-                    if let Some(raw) = db
-                        .get_cf(cf, key.as_bytes())
-                        .change_context(StitcherError::Rocks("get_cf".to_string()))?
-                    {
-                        if let Some((version, json)) = codec::unframe(&raw) {
-                            found.insert(key.clone(), (version, json.to_vec()));
-                            break; // first CF hit wins
+        let n_keys = keys.len();
+        super::traced(
+            "rocksdb",
+            metrics::store_get_seconds,
+            |found, secs| {
+                tracing::debug!(
+                    keys = n_keys,
+                    found = found.len(),
+                    elapsed_ms = secs * 1e3,
+                    "rocksdb: get across column families"
+                );
+            },
+            async {
+                let db = Arc::clone(&self.db);
+                let cf_names: HashSet<String> = self
+                    .known_cfs
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                let keys = keys.to_vec();
+                let out =
+                    spawn_blocking(move || -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
+                        let mut found = HashMap::with_capacity(keys.len());
+                        // resolve CF handles once per batch, not per (key, CF) pair
+                        let cfs: Vec<_> = cf_names
+                            .iter()
+                            .filter_map(|name| db.cf_handle(name))
+                            .collect();
+                        for key in &keys {
+                            for cf in &cfs {
+                                if let Some(raw) = db
+                                    .get_cf(cf, key.as_bytes())
+                                    .change_context(StitcherError::Rocks("get_cf".to_string()))?
+                                {
+                                    if let Some((version, json)) = codec::unframe(&raw) {
+                                        found.insert(key.clone(), (version, json.to_vec()));
+                                        break; // first CF hit wins
+                                    }
+                                    // unframeable bytes = corrupt cache entry → treat as absent
+                                }
+                            }
                         }
-                        // unframeable bytes = corrupt cache entry → treat as absent
-                    }
-                }
-            }
-            Ok(found)
-        })
+                        Ok(found)
+                    })
+                    .await
+                    .change_context(StitcherError::Rocks("spawn_blocking join".to_string()))??;
+                Ok(out)
+            },
+        )
         .await
-        .change_context(StitcherError::Rocks("spawn_blocking join".to_string()))??;
-        metrics::store_get_seconds("rocksdb", started.elapsed().as_secs_f64());
-        Ok(out)
     }
 
     async fn put_inner(
@@ -149,32 +163,47 @@ impl RocksStore {
         blob: &[u8],
         part: &PartitionRef,
     ) -> StitcherResult<()> {
-        let started = Instant::now();
-        let db = Arc::clone(&self.db);
-        let cf_name = part.cf_name();
-        let key_bytes = key.as_bytes().to_vec();
-        let value = codec::frame(version, blob);
-        spawn_blocking(move || -> StitcherResult<()> {
-            let cf = if let Some(cf) = db.cf_handle(&cf_name) {
-                cf
-            } else {
-                Self::create_cf_sync(&db, &cf_name)?;
-                db.cf_handle(&cf_name).ok_or_else(|| {
-                    error_stack::report!(StitcherError::Rocks(format!(
-                        "cf {cf_name} missing after create"
-                    )))
-                })?
-            };
-            let mut wopts = rocksdb::WriteOptions::default();
-            wopts.disable_wal(true); // cache only; remote is authoritative
-            db.put_cf_opt(&cf, key_bytes, value, &wopts)
-                .change_context(StitcherError::Rocks("put_cf".to_string()))?;
-            Ok(())
-        })
+        super::traced(
+            "rocksdb",
+            metrics::store_put_seconds,
+            |&(), secs| {
+                tracing::debug!(
+                    key = %key.as_str(),
+                    version,
+                    blob_bytes = blob.len(),
+                    cf = %part.cf_name(),
+                    elapsed_ms = secs * 1e3,
+                    "rocksdb: put_cf (wal disabled)"
+                );
+            },
+            async {
+                let db = Arc::clone(&self.db);
+                let cf_name = part.cf_name();
+                let key_bytes = key.as_bytes().to_vec();
+                let value = codec::frame(version, blob);
+                spawn_blocking(move || -> StitcherResult<()> {
+                    let cf = if let Some(cf) = db.cf_handle(&cf_name) {
+                        cf
+                    } else {
+                        Self::create_cf_sync(&db, &cf_name)?;
+                        db.cf_handle(&cf_name).ok_or_else(|| {
+                            error_stack::report!(StitcherError::Rocks(format!(
+                                "cf {cf_name} missing after create"
+                            )))
+                        })?
+                    };
+                    let mut wopts = rocksdb::WriteOptions::default();
+                    wopts.disable_wal(true); // cache only; remote is authoritative
+                    db.put_cf_opt(&cf, key_bytes, value, &wopts)
+                        .change_context(StitcherError::Rocks("put_cf".to_string()))?;
+                    Ok(())
+                })
+                .await
+                .change_context(StitcherError::Rocks("spawn_blocking join".to_string()))??;
+                Ok(())
+            },
+        )
         .await
-        .change_context(StitcherError::Rocks("spawn_blocking join".to_string()))??;
-        metrics::store_put_seconds("rocksdb", started.elapsed().as_secs_f64());
-        Ok(())
     }
 }
 

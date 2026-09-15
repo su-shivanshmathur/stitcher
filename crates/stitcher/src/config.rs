@@ -102,6 +102,13 @@ pub struct SourceKafka {
     pub topics: Vec<String>,
     /// Consumer group id (== `--consumer-group-id`).
     pub consumer_group: String,
+    /// Where a group without committed offsets starts: `"earliest"` (replay
+    /// the log) or `"latest"` (only new records); passed through to
+    /// `auto.offset.reset`.
+    pub auto_offset_reset: String,
+    /// librdkafka statistics interval in ms (feeds the consumer-lag gauges);
+    /// `0` disables.
+    pub statistics_interval_ms: u64,
     /// Extra librdkafka consumer properties (e.g. `partition.assignment.strategy`).
     pub extra: HashMap<String, String>,
 }
@@ -169,6 +176,10 @@ pub struct CqlCfg {
     pub username: Option<String>,
     /// Optional auth password (masked — never logged/debugged in clear).
     pub password: Option<Secret<String>>,
+    /// Rewrite discovered peer addresses — for nodes behind a port-forward/NAT that
+    /// advertise an unreachable IP (e.g. `"10.89.0.10:9042" = "127.0.0.1:9042"`).
+    /// Unmapped peers pass through untouched; empty = no translation.
+    pub address_translation: HashMap<String, String>,
 }
 
 /// `RocksDB` local cache settings.
@@ -323,6 +334,8 @@ impl Default for SourceKafka {
             brokers: Vec::new(),
             topics: Vec::new(),
             consumer_group: "stitcher".to_string(),
+            auto_offset_reset: "earliest".to_string(),
+            statistics_interval_ms: 10_000,
             extra: HashMap::new(),
         }
     }
@@ -357,6 +370,7 @@ impl Default for CqlCfg {
             table: "state".to_string(),
             username: None,
             password: None,
+            address_translation: HashMap::new(),
         }
     }
 }

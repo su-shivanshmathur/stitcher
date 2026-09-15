@@ -13,7 +13,8 @@ use std::{
 use error_stack::ResultExt;
 use rdkafka::{
     consumer::{Consumer, ConsumerContext, Rebalance, StreamConsumer},
-    ClientConfig, ClientContext, Message,
+    topic_partition_list::TopicPartitionList,
+    ClientConfig, ClientContext, Message, Offset,
 };
 
 use crate::{
@@ -32,31 +33,41 @@ pub struct RebalanceGuard {
 }
 
 impl RebalanceGuard {
-    /// Mark a batch as in-flight (returns `false` while a revoke drain is pending — caller
-    /// must not start new work in that window).
+    /// Mark a batch as in-flight; the returned token decrements on **drop**, so every
+    /// exit path (early `?`, shutdown timeout, aborted future) releases the rebalance
+    /// drain. `None` while a revoke drain is pending — caller must not start new work
+    /// in that window.
     #[must_use]
-    pub fn begin_batch(&self) -> bool {
+    pub fn begin_batch(&self) -> Option<BatchToken<'_>> {
         if self.drained_flag.load(Ordering::SeqCst) {
-            return false;
+            return None;
         }
         self.in_flight.fetch_add(1, Ordering::SeqCst);
         // Re-check: a revoke may have landed between the check and the increment.
         if self.drained_flag.load(Ordering::SeqCst) {
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
-            return false;
+            return None;
         }
-        true
-    }
-
-    /// Mark a batch finished (store persisted + offsets queued for commit).
-    pub fn end_batch(&self) {
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Some(BatchToken(self))
     }
 
     /// True while a revoke is waiting for the pipeline to drain.
     #[must_use]
     pub fn is_draining(&self) -> bool {
         self.drained_flag.load(Ordering::SeqCst)
+    }
+}
+
+/// RAII in-flight token returned by [`RebalanceGuard::begin_batch`]. Holding it for
+/// the whole batch body makes the count abort-safe: an early return or a dropped
+/// future cannot strand `in_flight > 0` and hang the rebalance drain (600 s) on
+/// shutdown.
+#[must_use]
+pub struct BatchToken<'a>(&'a RebalanceGuard);
+
+impl Drop for BatchToken<'_> {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -78,6 +89,33 @@ impl ClientContext for StitcherCtx {
 }
 
 impl ConsumerContext for StitcherCtx {
+    /// Broker acknowledgement of the async offset commit — the *true* receipt;
+    /// the `commit` call itself only queues the request.
+    fn commit_callback(
+        &self,
+        result: rdkafka::error::KafkaResult<()>,
+        offsets: &TopicPartitionList,
+    ) {
+        let rendered = offsets
+            .elements()
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}:{}@{}",
+                    e.topic(),
+                    e.partition(),
+                    e.offset().to_raw().unwrap_or(-1)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        match result {
+            Ok(()) => tracing::debug!(offsets = %rendered, "offsets committed (broker ack)"),
+            Err(e) => {
+                tracing::warn!(error = %e, offsets = %rendered, "offset commit rejected by broker")
+            }
+        }
+    }
     fn pre_rebalance(&self, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(tpl) = rebalance {
             self.guard.drained_flag.store(true, Ordering::SeqCst);
@@ -125,7 +163,7 @@ impl ConsumerContext for StitcherCtx {
     }
 }
 
-fn tpl_parts(tpl: &rdkafka::TopicPartitionList) -> Vec<PartitionRef> {
+fn tpl_parts(tpl: &TopicPartitionList) -> Vec<PartitionRef> {
     tpl.elements()
         .iter()
         .map(|e| PartitionRef {
@@ -156,16 +194,33 @@ impl KafkaConsumer {
         self.guard.clone()
     }
 
-    /// Async commit of current positions, retry ×3.
-    pub async fn commit(&self) -> StitcherResult<()> {
+    /// Explicit commit of a processed batch's watermarks (see
+    /// [`batch_watermarks`]). `enable.auto.offset.store=false` means no offsets
+    /// are ever stored implicitly — committing "current positions" is a silent
+    /// no-op — so the offsets come from what the batch actually finished.
+    /// Async: the broker's ack (or rejection) is logged by
+    /// [`StitcherCtx::commit_callback`]. Retry ×3 covers queue-side failures.
+    pub async fn commit(&self, watermarks: &[PartitionWatermark]) -> StitcherResult<()> {
+        if watermarks.is_empty() {
+            return Ok(()); // nothing processed in this batch
+        }
+        let mut offsets_to_commit = TopicPartitionList::with_capacity(watermarks.len());
+        for (topic, partition, next_offset) in watermarks {
+            offsets_to_commit
+                .add_partition_offset(topic, *partition, Offset::from_raw(*next_offset))
+                .change_context(StitcherError::Kafka("build commit watermark".to_string()))?;
+        }
         const RETRIES: usize = 3;
         let mut last_err: Option<String> = None;
         for attempt in 1..=RETRIES {
             match self
                 .consumer
-                .commit_consumer_state(rdkafka::consumer::CommitMode::Async)
+                .commit(&offsets_to_commit, rdkafka::consumer::CommitMode::Async)
             {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    tracing::debug!(partitions = watermarks.len(), "offset commit queued");
+                    return Ok(());
+                }
                 Err(e) => {
                     last_err = Some(e.to_string());
                     tracing::warn!(attempt, error = %e, "offset commit failed; retrying");
@@ -178,6 +233,32 @@ impl KafkaConsumer {
             last_err.unwrap_or_default()
         ))))
     }
+}
+
+/// One partition's commit position: `(topic, partition, next_offset_to_consume)`.
+pub type PartitionWatermark = (String, i32, i64);
+
+/// Per-partition commit watermark for a consumed batch: max offset + 1 per
+/// (topic, partition) — exactly the range the batch finished, independent of
+/// anything else the consumer may have fetched past it. Error records carry no
+/// offset and don't advance the watermark (they replay). Sorted for
+/// deterministic logs/commits.
+#[must_use]
+pub fn batch_watermarks(
+    records: &[rdkafka::error::KafkaResult<rdkafka::message::BorrowedMessage<'_>>],
+) -> Vec<PartitionWatermark> {
+    let mut next_offset_by_partition: std::collections::BTreeMap<(String, i32), i64> =
+        std::collections::BTreeMap::new();
+    for msg in records.iter().flatten() {
+        next_offset_by_partition
+            .entry((msg.topic().to_string(), msg.partition()))
+            .and_modify(|next| *next = (*next).max(msg.offset() + 1))
+            .or_insert(msg.offset() + 1);
+    }
+    next_offset_by_partition
+        .into_iter()
+        .map(|((topic, partition), next_offset)| (topic, partition, next_offset))
+        .collect()
 }
 
 /// Build + subscribe the consumer.
@@ -206,13 +287,20 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     };
     conf.set("bootstrap.servers", cfg.source_kafka.brokers.join(","))
         .set("group.id", &group_id)
+        // load-bearing for the at-least-once protocol — architectural, not
+        // deployment knobs: commits are explicit per-batch watermarks after
+        // persist (never auto), offsets are never stored implicitly (the
+        // watermark comes from the processed batch), and partition-EOF events
+        // would inject errors into the batch stream. `extra` remains the
+        // escape hatch for exotic setups.
         .set("enable.auto.commit", "false")
         .set("enable.partition.eof", "false")
         .set("enable.auto.offset.store", "false")
-        // fresh consumer groups start from the beginning of the log;
-        // overridable via source_kafka.extra
-        .set("auto.offset.reset", "earliest")
-        .set("statistics.interval.ms", "10000");
+        .set("auto.offset.reset", &cfg.source_kafka.auto_offset_reset)
+        .set(
+            "statistics.interval.ms",
+            cfg.source_kafka.statistics_interval_ms.to_string(),
+        );
     for (k, v) in &cfg.source_kafka.extra {
         conf.set(k, v);
     }

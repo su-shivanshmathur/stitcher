@@ -311,10 +311,10 @@ fn gen_key_body(template: &str) -> TokenStream2 {
                 parts.push(quote!(#lit.to_string()));
             }
             if let Some(close) = after.find('}') {
-                let path = after.get(1..close).unwrap_or_default().trim().to_string();
-                parts.push(quote!(
-                    ::stitcher::json_util::get_str(&__record, #path)?.to_string()
-                ));
+                let hole = after.get(1..close).unwrap_or_default();
+                let alternative_paths = split_alternatives(hole);
+                let call = get_str_with_alternatives(&alternative_paths);
+                parts.push(quote!(#call?.to_string()));
                 rest = after.get(close + 1..).unwrap_or_default();
             } else {
                 // unbalanced '{' — treat it as a literal and continue after it
@@ -333,6 +333,28 @@ fn gen_key_body(template: &str) -> TokenStream2 {
     }
 }
 
+/// Split a `{a|b}` hole / `require` entry into trimmed, non-empty alternatives.
+fn split_alternatives(hole: &str) -> Vec<&str> {
+    hole.split('|')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// `get_str` over `|`-separated alternatives — first present value wins
+/// (mirror of the runtime `KeySeg::Path` / `FilterProg::require` alternation).
+/// An empty alternative list always yields `None`.
+fn get_str_with_alternatives(alternative_paths: &[&str]) -> TokenStream2 {
+    let Some(first) = alternative_paths.first() else {
+        return quote!(::std::option::Option::<&str>::None);
+    };
+    let mut call = quote!(::stitcher::json_util::get_str(&__record, #first));
+    for path in alternative_paths.iter().skip(1) {
+        call = quote!(#call.or_else(|| ::stitcher::json_util::get_str(&__record, #path)));
+    }
+    call
+}
+
 // ---------------------------------------------------------------------------
 // decode filter
 // ---------------------------------------------------------------------------
@@ -342,7 +364,9 @@ fn gen_filter(schema: &Schema) -> TokenStream2 {
     let requires: Vec<TokenStream2> = filter
         .require
         .iter()
-        .map(|p| {
+        .map(|entry| {
+            let alternative_paths = split_alternatives(entry);
+            let get = get_str_with_alternatives(&alternative_paths);
             let reject = filter.reject_if_contains.clone();
             let reject_check = reject
                 .map(|sub| {
@@ -352,7 +376,7 @@ fn gen_filter(schema: &Schema) -> TokenStream2 {
                 })
                 .unwrap_or_default();
             quote!({
-                let __v = ::stitcher::json_util::get_str(&__record, #p)?;
+                let __v = #get?;
                 if __v.is_empty() { return None; }
                 #reject_check
             })
@@ -360,13 +384,17 @@ fn gen_filter(schema: &Schema) -> TokenStream2 {
         .collect();
 
     let log_types: Vec<String> = filter.log_type_in.clone();
+    let log_type_path = filter
+        .log_type_path
+        .clone()
+        .unwrap_or_else(|| "log_type".to_string());
     let log_type_check = if log_types.is_empty() {
         TokenStream2::new()
     } else {
         quote! {
             {
                 let allowed: &[&str] = &[#(#log_types),*];
-                match ::stitcher::json_util::get_str(&__record, "log.log_type") {
+                match ::stitcher::json_util::get_str(&__record, #log_type_path) {
                     Some(lt) if allowed.contains(&lt) => {}
                     _ => return None,
                 }
@@ -643,6 +671,14 @@ fn gen_value(src: &str) -> Result<TokenStream2, syn::Error> {
 
 fn emit(pair: Pair<'_, Rule>) -> Result<TokenStream2, syn::Error> {
     match pair.as_rule() {
+        // entry wrapper (`file = { SOI ~ expr ~ EOI }`); descend to the expr
+        Rule::file => {
+            let expr = pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| syn::Error::new(Span::call_site(), "empty expression"))?;
+            emit(expr)
+        }
         Rule::expr => {
             let mut inner = pair.into_inner();
             let first = inner

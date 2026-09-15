@@ -15,21 +15,27 @@ use crate::errors::{StitcherError, StitcherResult};
 pub enum KeySeg {
     /// Literal text between `{…}` holes.
     Literal(String),
-    /// A `{log.path}` hole; a missing or non-string value drops the record
-    /// (== `_primaryKey`).
-    Path(String),
+    /// A `{log.path}` hole; alternatives separated by `|` inside the hole
+    /// (`{log.payment_id|log.payment_intent_id}`) resolve to the first
+    /// present value — for identity components that live at different paths
+    /// across event types. All alternatives missing (or non-string) drops
+    /// the record (== `_primaryKey`).
+    Path(Vec<String>),
 }
 
 /// Record admission filter (== `_decodeLog`), compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilterProg {
-    /// Required non-empty paths.
-    pub require: Vec<String>,
+    /// Required non-empty paths; each entry carries `|`-separated alternatives
+    /// (any one present satisfies the requirement).
+    pub require: Vec<Vec<String>>,
     /// Reject records whose required string fields contain this substring (only
     /// checked while iterating `require` — inert when `require` is empty, like codegen).
     pub reject_if_contains: Option<String>,
-    /// Allowed `log.log_type` values (empty = no check).
+    /// Allowed `log_type` values (empty = no check).
     pub log_type_in: Vec<String>,
+    /// Path the `log_type` value is read from.
+    pub log_type_path: String,
     /// Tenant id path (compared against the processor's `tenant_ids`).
     pub tenant_path: String,
 }
@@ -177,9 +183,26 @@ fn compile(schema: &model::Schema) -> Result<Program, String> {
         }
     }
     let filter = FilterProg {
-        require: schema.decode_filter.require.clone(),
+        require: schema
+            .decode_filter
+            .require
+            .iter()
+            .map(|entry| {
+                entry
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
         reject_if_contains: schema.decode_filter.reject_if_contains.clone(),
         log_type_in: schema.decode_filter.log_type_in.clone(),
+        log_type_path: schema
+            .decode_filter
+            .log_type_path
+            .clone()
+            .unwrap_or_else(|| "log_type".to_string()),
         tenant_path: schema
             .decode_filter
             .tenant_path
@@ -272,29 +295,35 @@ fn compile_when(when: &Option<String>) -> Result<Option<Expr>, String> {
 /// `"{log.a}-{log.b}"` → segments (mirror of `stitcher_macro`'s `gen_key_body`,
 /// including the unbalanced-`{`-is-literal rule).
 fn compile_key(template: &str) -> Vec<KeySeg> {
-    let mut segs = Vec::new();
+    let mut segments = Vec::new();
     let mut rest = template;
     loop {
         if let Some(open) = rest.find('{') {
-            let (lit, after) = rest.split_at(open);
-            if !lit.is_empty() {
-                segs.push(KeySeg::Literal(lit.to_string()));
+            let (literal, after) = rest.split_at(open);
+            if !literal.is_empty() {
+                segments.push(KeySeg::Literal(literal.to_string()));
             }
             if let Some(close) = after.find('}') {
-                let path = after.get(1..close).unwrap_or_default().trim().to_string();
-                segs.push(KeySeg::Path(path));
+                let hole = after.get(1..close).unwrap_or_default();
+                let alternative_paths: Vec<String> = hole
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                segments.push(KeySeg::Path(alternative_paths));
                 rest = after.get(close + 1..).unwrap_or_default();
             } else {
                 // unbalanced '{' — treat it as a literal and continue after it
-                segs.push(KeySeg::Literal("{".to_string()));
+                segments.push(KeySeg::Literal("{".to_string()));
                 rest = after.get(1..).unwrap_or_default();
             }
         } else {
             if !rest.is_empty() {
-                segs.push(KeySeg::Literal(rest.to_string()));
+                segments.push(KeySeg::Literal(rest.to_string()));
             }
             break;
         }
     }
-    segs
+    segments
 }

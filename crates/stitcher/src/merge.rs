@@ -65,13 +65,13 @@ pub struct KeyedMap<K: Eq + Hash, V>(pub HashMap<K, V>);
 
 impl<K: Eq + Hash, V: Merge> Merge for KeyedMap<K, V> {
     fn merge(mut self, newer: Self) -> Self {
-        for (k, v) in newer.0 {
+        for (entry_key, entry_value) in newer.0 {
             // Reuse the LHS allocation: remove + insert instead of building a fresh map.
-            let combined = match self.0.remove(&k) {
-                Some(old) => old.merge(v),
-                None => v,
+            let combined = match self.0.remove(&entry_key) {
+                Some(old) => old.merge(entry_value),
+                None => entry_value,
             };
-            self.0.insert(k, combined);
+            self.0.insert(entry_key, combined);
         }
         self
     }
@@ -126,8 +126,8 @@ impl Counter {
 impl<T: Merge> Merge for Option<T> {
     fn merge(self, newer: Self) -> Self {
         match (self, newer) {
-            (Some(a), Some(b)) => Some(a.merge(b)),
-            (a, b) => a.or(b),
+            (Some(old), Some(new)) => Some(old.merge(new)),
+            (old, new) => old.or(new),
         }
     }
 }
@@ -195,13 +195,16 @@ impl MergeValue {
             } => {
                 serde_json::json!({ "comparator": comparator, "payload": payload })
             }
-            Self::Map(m) => Value::Object(
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.to_value_full()))
+            Self::Map(entries) => Value::Object(
+                entries
+                    .iter()
+                    .map(|(entry_key, entry_value)| {
+                        (entry_key.clone(), entry_value.to_value_full())
+                    })
                     .collect(),
             ),
-            Self::Leaf(v) => v.clone(),
-            Self::Counter(n) => Value::from(*n),
+            Self::Leaf(value) => value.clone(),
+            Self::Counter(count) => Value::from(*count),
         }
     }
 }
@@ -209,44 +212,46 @@ impl MergeValue {
 impl Merge for MergeValue {
     fn merge(self, newer: Self) -> Self {
         match (self, newer) {
-            (Self::Null, n) | (n, Self::Null) => n,
+            (Self::Null, other) | (other, Self::Null) => other,
             (
                 Self::LatestBy {
-                    comparator: c1,
-                    payload: p1,
+                    comparator: old_comparator,
+                    payload: old_payload,
                 },
                 Self::LatestBy {
-                    comparator: c2,
-                    payload: p2,
+                    comparator: new_comparator,
+                    payload: new_payload,
                 },
             ) => {
-                if c1 > c2 {
+                if old_comparator > new_comparator {
                     Self::LatestBy {
-                        comparator: c1,
-                        payload: p1,
+                        comparator: old_comparator,
+                        payload: old_payload,
                     }
                 } else {
                     Self::LatestBy {
-                        comparator: c2,
-                        payload: p2,
+                        comparator: new_comparator,
+                        payload: new_payload,
                     }
                 }
             }
-            (Self::Map(mut old), Self::Map(new)) => {
-                for (k, v) in new {
+            (Self::Map(mut old_entries), Self::Map(new_entries)) => {
+                for (entry_key, entry_value) in new_entries {
                     // Reuse the LHS allocation: remove + insert instead of building a fresh map.
-                    let combined = match old.remove(&k) {
-                        Some(prev) => prev.merge(v),
-                        None => v,
+                    let merged_entry = match old_entries.remove(&entry_key) {
+                        Some(existing) => existing.merge(entry_value),
+                        None => entry_value,
                     };
-                    old.insert(k, combined);
+                    old_entries.insert(entry_key, merged_entry);
                 }
-                Self::Map(old)
+                Self::Map(old_entries)
             }
-            (Self::Leaf(_), n @ Self::Leaf(_)) => n,
-            (Self::Counter(a), Self::Counter(b)) => Self::Counter(a.saturating_add(b)),
+            (Self::Leaf(_), newer @ Self::Leaf(_)) => newer,
+            (Self::Counter(old_count), Self::Counter(new_count)) => {
+                Self::Counter(old_count.saturating_add(new_count))
+            }
             // variant mismatch (schema drift): newer wins
-            (_, n) => n,
+            (_, newer) => newer,
         }
     }
 }
@@ -267,11 +272,11 @@ impl Serialize for MergeValue {
                 let map = serializer.serialize_map(Some(0))?;
                 map.end()
             }
-            Self::Map(m) => {
-                let mut map = serializer.serialize_map(Some(m.len()))?;
-                for (k, v) in m {
-                    if !v.is_identity() {
-                        map.serialize_entry(k, v)?;
+            Self::Map(entries) => {
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (entry_key, entry_value) in entries {
+                    if !entry_value.is_identity() {
+                        map.serialize_entry(entry_key, entry_value)?;
                     }
                 }
                 map.end()

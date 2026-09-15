@@ -82,6 +82,14 @@ pub fn compile(src: &str) -> Result<Expr, String> {
 /// pest-pair → AST (structural mirror of `stitcher_macro::codegen::emit`).
 fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
     match pair.as_rule() {
+        // entry wrapper (`file = { SOI ~ expr ~ EOI }`); descend to the expr
+        Rule::file => {
+            let expr = pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| "empty expression".to_string())?;
+            build(expr)
+        }
         Rule::expr => {
             let mut inner = pair.into_inner();
             let first = inner.next().ok_or("empty expr")?;

@@ -15,7 +15,10 @@ pub struct Schema {
     /// Store `id_type` discriminator.
     pub id_type: String,
     /// Key template with `{log.path}` segments, e.g.
-    /// `"{log.payment_id}-{log.merchant_id}"`.
+    /// `"{log.payment_id}-{log.merchant_id}"`. A hole may carry `|`
+    /// alternatives (`{log.payment_id|log.payment_intent_id}`) that resolve to
+    /// the first present value — for identity components that live at
+    /// different paths across event types.
     pub primary_key: String,
     /// Record admission filter.
     #[serde(default)]
@@ -31,15 +34,20 @@ pub struct Schema {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DecodeFilter {
-    /// Required non-empty paths.
+    /// Required non-empty paths; an entry may carry `|` alternatives
+    /// (`"log.payment_id|log.payment_intent_id"`) of which any one present
+    /// satisfies the requirement.
     #[serde(default)]
     pub require: Vec<String>,
     /// Reject records whose required string fields contain this substring.
     #[serde(default)]
     pub reject_if_contains: Option<String>,
-    /// Allowed `log.log_type` values.
+    /// Allowed `log_type` values (read from `log_type_path`).
     #[serde(default)]
     pub log_type_in: Vec<String>,
+    /// Path the `log_type` value is read from (default `log_type` — the
+    /// producer's top-level discriminator sits next to the `log` payload).
+    pub log_type_path: Option<String>,
     /// Tenant id path (compared against the processor's `tenant_ids`; default
     /// `log.tenant_id`).
     pub tenant_path: Option<String>,

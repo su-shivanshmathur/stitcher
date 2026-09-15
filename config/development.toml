@@ -5,13 +5,18 @@ host = "0.0.0.0"
 port = 9090
 
 [log]
-level = "info"
-format = "json"
+# directive syntax: deps (rdkafka/scylla/actix) at info, the framework's debug
+# logs (consumed keys, filter reasons, cql statements, commits) on; RUST_LOG wins
+level = "info,stitcher=debug"
 
 [source_kafka]
 brokers = ["localhost:9092"]
 topics = ["consolidated-events"]
 consumer_group = "stitcher"
+# where a group without committed offsets starts: earliest | latest
+auto_offset_reset = "earliest"
+# librdkafka stats interval (consumer-lag gauges), ms; 0 disables
+statistics_interval_ms = 10000
 extra = { "queued.max.messages.kbytes" = "16384", "partition.assignment.strategy" = "cooperative-sticky" }
 
 [sink_kafka]

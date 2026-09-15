@@ -7,7 +7,11 @@
 pub struct DslParser;
 
 /// Parse an expression source string into its pest pairs.
+///
+/// Parses the `file` entry rule (`SOI ~ expr ~ EOI`) so a prefix match is a
+/// hard error instead of a silently truncated expression; the returned pairs
+/// start at the `expr` rule, matching the pre-`EOI` shape callers expect.
 pub fn parse_expr(src: &str) -> Result<pest::iterators::Pairs<'_, Rule>, pest::error::Error<Rule>> {
     use pest::Parser;
-    DslParser::parse(Rule::expr, src)
+    DslParser::parse(Rule::file, src)
 }
