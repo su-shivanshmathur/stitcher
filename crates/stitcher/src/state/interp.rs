@@ -60,22 +60,28 @@ impl ConfigProcessor {
             }
         }
         if !filter.log_type_in.is_empty() {
-            let log_type = json_util::get_str(record, &filter.log_type_path);
+            let log_type = filter
+                .log_type_path
+                .iter()
+                .find_map(|path| json_util::get_str(record, path));
             if !log_type.is_some_and(|lt| filter.log_type_in.iter().any(|allowed| allowed == lt)) {
                 tracing::debug!(
                     log_type = ?log_type,
-                    path = %filter.log_type_path,
+                    paths = ?filter.log_type_path,
                     "record filtered: log_type not allowed"
                 );
                 return None;
             }
         }
         if !self.tenant_ids.is_empty() {
-            let tenant = json_util::get_str(record, &filter.tenant_path);
+            let tenant = filter
+                .tenant_path
+                .iter()
+                .find_map(|path| json_util::get_str(record, path));
             if !tenant.is_some_and(|t| self.tenant_ids.contains(t)) {
                 tracing::debug!(
                     tenant = ?tenant,
-                    tenant_path = %filter.tenant_path,
+                    tenant_path = ?filter.tenant_path,
                     "record filtered: tenant not allowed"
                 );
                 return None;
@@ -317,6 +323,8 @@ fn decode_latest_by(v: &Value) -> Option<MergeValue> {
 /// once-evaluated walk.
 fn eval(expr: &Expr, record: &Value) -> Value {
     match expr {
+        // `$` — the whole record, stored/read as sent.
+        Expr::Root => record.clone(),
         Expr::Path(p) => json_util::get_path(record, p)
             .cloned()
             .unwrap_or(Value::Null),

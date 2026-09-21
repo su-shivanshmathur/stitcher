@@ -63,8 +63,10 @@ pub enum Field {
         when: Option<String>,
         /// Comparator expression (coerced to epoch nanos).
         comparator: String,
-        /// Payload expression.
-        payload: String,
+        /// Payload expression: a path (`log`, `response`, …) or `$`; omitted ⇒ `$`
+        /// (the whole record, as sent).
+        #[serde(default)]
+        payload: Option<String>,
     },
     /// Map with per-key merged values; absent key → insert (maps only grow).
     KeyedMap {

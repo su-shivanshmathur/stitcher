@@ -34,10 +34,12 @@ pub struct FilterProg {
     pub reject_if_contains: Option<String>,
     /// Allowed `log_type` values (empty = no check).
     pub log_type_in: Vec<String>,
-    /// Path the `log_type` value is read from.
-    pub log_type_path: String,
-    /// Tenant id path (compared against the processor's `tenant_ids`).
-    pub tenant_path: String,
+    /// Paths the `log_type` value is read from; `|`-alternatives resolve to the
+    /// first present (a lifecycle event carries `log_type`, an API event `api_flow`).
+    pub log_type_path: Vec<String>,
+    /// Tenant id paths (first-present-wins across `|`-alternatives, for event
+    /// types that carry the tenant at different paths).
+    pub tenant_path: Vec<String>,
 }
 
 /// `keyed_map` value node (v1: always `latest_by`, gated by the map's own `when`).
@@ -182,32 +184,30 @@ fn compile(schema: &model::Schema) -> Result<Program, String> {
             }
         }
     }
+    // A `|`-separated string → its trimmed, non-empty alternatives (first-present-wins
+    // at admission/keying). Shared by `require`, `log_type_path` and `tenant_path`.
+    let split_alts = |src: &str| -> Vec<String> {
+        src.split('|')
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     let filter = FilterProg {
         require: schema
             .decode_filter
             .require
             .iter()
-            .map(|entry| {
-                entry
-                    .split('|')
-                    .map(str::trim)
-                    .filter(|path| !path.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
+            .map(|entry| split_alts(entry))
             .collect(),
         reject_if_contains: schema.decode_filter.reject_if_contains.clone(),
         log_type_in: schema.decode_filter.log_type_in.clone(),
-        log_type_path: schema
-            .decode_filter
-            .log_type_path
-            .clone()
-            .unwrap_or_else(|| "log_type".to_string()),
-        tenant_path: schema
-            .decode_filter
-            .tenant_path
-            .clone()
-            .unwrap_or_else(|| "log.tenant_id".to_string()),
+        log_type_path: split_alts(
+            schema.decode_filter.log_type_path.as_deref().unwrap_or("log_type"),
+        ),
+        tenant_path: split_alts(
+            schema.decode_filter.tenant_path.as_deref().unwrap_or("log.tenant_id"),
+        ),
     };
     let mut fields = BTreeMap::new();
     for (name, field) in &schema.fields {
@@ -246,7 +246,7 @@ fn compile_field(field: &model::Field) -> Result<FieldProg, String> {
         } => Ok(FieldProg::LatestBy {
             when: compile_when(when)?,
             comparator: stitcher_dsl::expr::compile(comparator)?,
-            payload: stitcher_dsl::expr::compile(payload)?,
+            payload: compile_payload(payload)?,
         }),
         model::Field::KeyedMap { when, key, value } => {
             let value = match value.as_ref() {
@@ -256,7 +256,7 @@ fn compile_field(field: &model::Field) -> Result<FieldProg, String> {
                     payload,
                 } => LatestByProg {
                     comparator: stitcher_dsl::expr::compile(comparator)?,
-                    payload: stitcher_dsl::expr::compile(payload)?,
+                    payload: compile_payload(payload)?,
                 },
                 model::Field::LatestBy { when: Some(_), .. } => {
                     return Err(
@@ -289,6 +289,14 @@ fn compile_when(when: &Option<String>) -> Result<Option<Expr>, String> {
     match when {
         Some(src) => stitcher_dsl::expr::compile(src).map(Some),
         None => Ok(None),
+    }
+}
+
+/// Compile a payload expression; omitted (`None`) ⇒ `$` (the whole record, as sent).
+fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
+    match payload {
+        Some(src) => stitcher_dsl::expr::compile(src),
+        None => Ok(Expr::Root),
     }
 }
 

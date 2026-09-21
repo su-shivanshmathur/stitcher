@@ -11,10 +11,12 @@ primary_key: "{payment_id|log.payment_id}-{merchant_id|log.merchant_id}"
 decode_filter:
   require: [payment_id|log.payment_id, merchant_id|log.merchant_id]
   reject_if_contains: undefined
-  # the producer's discriminator sits at the top level, next to the `log` payload
-  log_type_in: [payment_intent, payment_attempt, refund, dispute]
-  log_type_path: log_type
-  tenant_path: log.tenant_id
+  # discriminator read first-present-wins: lifecycle events carry `log_type`,
+  # API events carry `api_flow` — both feed the same payment session.
+  log_type_in: [payment_intent, payment_attempt, refund, dispute, PaymentsCreate]
+  log_type_path: "log_type|api_flow"
+  # tenant sits under `log` on lifecycle events, top-level on API events.
+  tenant_path: "log.tenant_id|tenant_id"
 fields:
   payment_intent:
     node: latest_by
@@ -45,5 +47,13 @@ fields:
       node: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
+  api_event_object:
+    node: keyed_map
+    when: "api_flow == 'PaymentsCreate'"
+    key: "meaningful(created_at_timestamp)"
+    value:
+      node: latest_by
+      comparator: "parse_time(created_at_timestamp)"
+      # payload omitted ⇒ defaults to `$` (the whole event, stored as sent)
   log_count:
     node: counter

@@ -180,7 +180,7 @@ fn validate_field(field: &Field) -> Result<(), syn::Error> {
                 check_expr(w)?;
             }
             check_expr(comparator)?;
-            check_expr(payload)?;
+            check_payload(payload)?;
         }
         Field::KeyedMap { when, key, value } => {
             if let Some(w) = when {
@@ -213,6 +213,22 @@ fn check_expr(src: &str) -> Result<(), syn::Error> {
     parse_expr(src)
         .map(|_| ())
         .map_err(|e| syn::Error::new(Span::call_site(), format!("invalid DSL {src:?}: {e}")))
+}
+
+/// Validate a payload; omitted (`None`) ⇒ ok (defaults to `$`, the whole record).
+fn check_payload(payload: &Option<String>) -> Result<(), syn::Error> {
+    match payload {
+        Some(src) => check_expr(src),
+        None => Ok(()),
+    }
+}
+
+/// Emit a payload value; omitted (`None`) ⇒ the whole record (`$`).
+fn gen_payload(payload: &Option<String>) -> Result<TokenStream2, syn::Error> {
+    match payload {
+        Some(src) => gen_value(src),
+        None => Ok(quote!(__record.clone())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,17 +400,17 @@ fn gen_filter(schema: &Schema) -> TokenStream2 {
         .collect();
 
     let log_types: Vec<String> = filter.log_type_in.clone();
-    let log_type_path = filter
-        .log_type_path
-        .clone()
-        .unwrap_or_else(|| "log_type".to_string());
+    // discriminator + tenant read first-present-wins over `|`-alternatives, same as
+    // `require`/the key template (and the interpreter's `admit`).
+    let log_type_get =
+        get_str_with_alternatives(&split_alternatives(filter.log_type_path.as_deref().unwrap_or("log_type")));
     let log_type_check = if log_types.is_empty() {
         TokenStream2::new()
     } else {
         quote! {
             {
                 let allowed: &[&str] = &[#(#log_types),*];
-                match ::stitcher::json_util::get_str(&__record, #log_type_path) {
+                match #log_type_get {
                     Some(lt) if allowed.contains(&lt) => {}
                     _ => return None,
                 }
@@ -402,13 +418,11 @@ fn gen_filter(schema: &Schema) -> TokenStream2 {
         }
     };
 
-    let tenant_path = filter
-        .tenant_path
-        .clone()
-        .unwrap_or_else(|| "log.tenant_id".to_string());
+    let tenant_get =
+        get_str_with_alternatives(&split_alternatives(filter.tenant_path.as_deref().unwrap_or("log.tenant_id")));
     let tenant_check = quote! {
         if !self.tenant_ids.is_empty() {
-            match ::stitcher::json_util::get_str(&__record, #tenant_path) {
+            match #tenant_get {
                 Some(t) if self.tenant_ids.contains(t) => {}
                 _ => return None,
             }
@@ -462,7 +476,7 @@ fn field_build(field: &Field) -> Result<TokenStream2, syn::Error> {
             payload,
         } => {
             let cmp = gen_value(comparator)?;
-            let pay = gen_value(payload)?;
+            let pay = gen_payload(payload)?;
             wrap_when(
                 when.as_ref(),
                 quote! {
@@ -527,7 +541,7 @@ fn field_build_inner(field: &Field) -> Result<TokenStream2, syn::Error> {
                 ));
             }
             let cmp = gen_value(comparator)?;
-            let pay = gen_value(payload)?;
+            let pay = gen_payload(payload)?;
             Ok(quote! {
                 {
                     let __cmp = #cmp;
@@ -759,6 +773,7 @@ fn emit(pair: Pair<'_, Rule>) -> Result<TokenStream2, syn::Error> {
             Ok(quote!(serde_json::Value::from(#b)))
         }
         Rule::null => Ok(quote!(serde_json::Value::Null)),
+        Rule::root => Ok(quote!(__record.clone())),
         Rule::path => {
             let dotted = pair.as_str().to_string();
             Ok(quote!(

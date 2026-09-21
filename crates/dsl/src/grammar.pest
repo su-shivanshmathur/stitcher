@@ -9,7 +9,7 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 // expression.
 file    = { SOI ~ expr ~ EOI }
 expr    = { term ~ (bin_op ~ term)* }
-term    = { literal | call | path | unary | "(" ~ expr ~ ")" }
+term    = { literal | call | path | root | unary | "(" ~ expr ~ ")" }
 unary   = { "!" ~ term }
 call    = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 // Identifier-rooted path: the record envelope carries fields next to the `log`
@@ -19,6 +19,8 @@ call    = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 // the space skipped before its zero-width repetition, e.g. `log_type == 'x'`
 // would otherwise capture `"log_type "`).
 path    = @{ ident ~ ("." ~ ident)* }
+// `$` = the whole record (the event as sent), for flat schemas with no envelope.
+root    = @{ "$" }
 literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
