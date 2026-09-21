@@ -18,6 +18,11 @@ pub trait EvalContext {
     /// Resolve a dotted path to a value; a miss yields [`Value::Null`].
     fn resolve_path(&self, path: &str) -> Value;
 
+    /// `$` — the whole record, as sent. Default: unavailable in this context ⇒ `Null`.
+    fn root(&self) -> Value {
+        Value::Null
+    }
+
     /// `lookup(table, key)` enrichment join. Default: enrichment is unavailable in
     /// this context, so it yields [`Value::Null`].
     fn lookup(&self, _table: &str, _key: &str) -> Value {
@@ -29,6 +34,7 @@ pub trait EvalContext {
 /// comparisons yield `false`; never panics.
 pub fn eval<C: EvalContext>(expr: &Expr, cx: &C) -> Value {
     match expr {
+        Expr::Root => cx.root(),
         Expr::Path(path) => cx.resolve_path(path),
         Expr::Str(s) => Value::String(s.clone()),
         Expr::Int(i) => Value::from(*i),

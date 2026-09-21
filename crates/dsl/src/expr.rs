@@ -146,6 +146,8 @@ impl std::str::FromStr for Builtin {
 /// Compiled expression tree over `serde_json::Value` records.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
+    /// The whole record (`$`) — the event as sent, for flat schemas with no envelope.
+    Root,
     /// Dotted record path (`log.a.b`); misses evaluate to `null`.
     Path(String),
     /// String literal.
@@ -236,6 +238,7 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
         }
         Rule::bool => Ok(Expr::Bool(pair.as_str() == "true")),
         Rule::null => Ok(Expr::Null),
+        Rule::root => Ok(Expr::Root),
         Rule::path => Ok(Expr::Path(pair.as_str().to_string())),
         Rule::call => {
             let mut inner = pair.into_inner();

@@ -18,7 +18,7 @@ file    = { SOI ~ or ~ EOI }
 or      = { and ~ ("||" ~ and)* }
 and     = { cmp ~ ("&&" ~ cmp)* }
 cmp     = { term ~ (cmp_op ~ term)? }
-term    = { literal | call | path | unary | "(" ~ or ~ ")" }
+term    = { literal | call | path | root | unary | "(" ~ or ~ ")" }
 unary   = { "!" ~ term }
 call    = { ident ~ "(" ~ (or ~ ("," ~ or)*)? ~ ")" }
 // Identifier-rooted path: the record envelope carries fields next to the `log`
@@ -28,6 +28,8 @@ call    = { ident ~ "(" ~ (or ~ ("," ~ or)*)? ~ ")" }
 // the space skipped before its zero-width repetition, e.g. `log_type == 'x'`
 // would otherwise capture `"log_type "`).
 path    = @{ ident ~ ("." ~ ident)* }
+// `$` = the whole record (the event as sent), for flat schemas with no envelope.
+root    = @{ "$" }
 literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
