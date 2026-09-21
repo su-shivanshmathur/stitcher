@@ -1,0 +1,19 @@
+[package]
+name = "transformer"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+stitcher = { path = "../stitcher" }
+stitcher-dsl = { path = "../dsl" }
+
+serde.workspace = true
+serde_json.workspace = true
+config.workspace = true
+tracing.workspace = true
+error-stack.workspace = true
+
+[lints]
+workspace = true

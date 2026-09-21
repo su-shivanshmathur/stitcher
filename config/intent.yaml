@@ -54,21 +54,8 @@ fields:
   api_event_object:
     node: keyed_map
     when: "api_flow == 'PaymentsCreate' || api_flow == 'PaymentsConfirm'"
-    key: "meaningful(log.request_id)"
-sinks:
-  - name: intent
-    topic: stitcher-intent-events
-    field: payment_intent
-    key_path: payment_id
-  - name: attempt
-    topic: stitcher-attempt-events
-    field: payment_attempt_object
-    fan_out: true
-  - name: refund
-    topic: stitcher-refund-events
-    field: refund_object
-    fan_out: true
-  - name: dispute
-    topic: stitcher-dispute-events
-    field: dispute_object
-    fan_out: true
+    key: "meaningful(request_id)"
+    value:
+      node: latest_by
+      comparator: "parse_time(log.modified_at)"
+      payload: "log"

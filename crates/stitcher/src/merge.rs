@@ -104,6 +104,28 @@ impl<T> LastWrite<T> {
     }
 }
 
+/// Keep the **leftmost** (first-written) `Some` — a write-once / sticky field:
+/// once assigned it never changes. The dual of [`LastWrite`]. Because the
+/// pipeline persists before committing offsets, the first assignment is stable
+/// across restarts and replay. Serialized transparently.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FirstWrite<T>(pub Option<T>);
+
+impl<T> Merge for FirstWrite<T> {
+    fn merge(self, newer: Self) -> Self {
+        Self(self.0.or(newer.0)) // keep the older value if present (first-write wins)
+    }
+}
+
+impl<T> FirstWrite<T> {
+    /// True when unset (used for `omitNothingFields`-style serde).
+    #[must_use]
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 /// Sum two counts (== `Data.Monoid.Sum Int`). Serialized transparently.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -160,6 +182,10 @@ pub enum MergeValue {
     Map(BTreeMap<String, Self>),
     /// `last` node's present value (== `LastWrite(Some)`).
     Leaf(Value),
+    /// `once` node's present value (== [`FirstWrite`]`(Some)`): first-write wins,
+    /// so merging keeps the older side. Distinct from [`MergeValue::Leaf`]
+    /// (last-write) precisely in its merge direction.
+    Once(Value),
     /// `counter` node (== [`Counter`]).
     Counter(i64),
 }
@@ -178,35 +204,10 @@ impl MergeValue {
                 comparator,
                 payload,
             } => *comparator == 0 && payload.is_null(),
-            Self::Leaf(_) => false,
+            Self::Leaf(_) | Self::Once(_) => false,
         }
     }
 
-    /// Serialize with NO identity-skip: every map entry rendered, like the typed
-    /// processors' field values (their skip is field-level only, and callers of this
-    /// gate on identity first). Encode payloads use this; stored state uses `Serialize`.
-    #[must_use]
-    pub fn to_value_full(&self) -> Value {
-        match self {
-            Self::Null => Value::Null,
-            Self::LatestBy {
-                comparator,
-                payload,
-            } => {
-                serde_json::json!({ "comparator": comparator, "payload": payload })
-            }
-            Self::Map(entries) => Value::Object(
-                entries
-                    .iter()
-                    .map(|(entry_key, entry_value)| {
-                        (entry_key.clone(), entry_value.to_value_full())
-                    })
-                    .collect(),
-            ),
-            Self::Leaf(value) => value.clone(),
-            Self::Counter(count) => Value::from(*count),
-        }
-    }
 }
 
 impl Merge for MergeValue {
@@ -247,6 +248,8 @@ impl Merge for MergeValue {
                 Self::Map(old_entries)
             }
             (Self::Leaf(_), newer @ Self::Leaf(_)) => newer,
+            // first-write wins: keep the older (left) value
+            (old @ Self::Once(_), Self::Once(_)) => old,
             (Self::Counter(old_count), Self::Counter(new_count)) => {
                 Self::Counter(old_count.saturating_add(new_count))
             }
@@ -290,8 +293,9 @@ impl Serialize for MergeValue {
                 map.serialize_entry("payload", payload)?;
                 map.end()
             }
-            Self::Leaf(v) => v.serialize(serializer),
+            Self::Leaf(v) | Self::Once(v) => v.serialize(serializer),
             Self::Counter(n) => serializer.serialize_i64(*n),
         }
     }
 }
+

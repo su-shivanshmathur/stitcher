@@ -1,5 +1,4 @@
-//! DSL runtime built-ins (PLAN §25); used by the config-driven interpreter and
-//! `schema!` codegen output.
+//! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
 use serde_json::Value;
 
@@ -107,7 +106,7 @@ pub fn coalesce<'a>(a: &'a Value, b: &'a Value) -> Option<&'a Value> {
 }
 
 // ---------------------------------------------------------------------------
-// helpers used by `schema!`-generated code
+// truthiness / comparison / key helpers
 // ---------------------------------------------------------------------------
 
 /// Truthiness for DSL predicates: `Null`/`false`/`""`/`0` are false; everything else true.
@@ -154,4 +153,65 @@ pub fn key_string(v: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// collection reducers + path extraction (transform DSL; TRANSFORMER.md)
+// ---------------------------------------------------------------------------
+
+/// `latest(map)`: the `payload` of the keyed-map entry with the greatest stored
+/// `comparator` (the aggregate's own recency — the most-recently-updated entry).
+/// `Null` when empty or not a `{id: {comparator, payload}}` map.
+#[must_use]
+pub fn latest(map: &Value) -> Value {
+    reduce_by_comparator(map, true)
+}
+
+/// `first(map)`: the `payload` of the entry with the smallest `comparator`.
+#[must_use]
+pub fn first(map: &Value) -> Value {
+    reduce_by_comparator(map, false)
+}
+
+fn reduce_by_comparator(map: &Value, want_max: bool) -> Value {
+    let Value::Object(entries) = map else {
+        return Value::Null;
+    };
+    let mut best: Option<(i64, &Value)> = None; // (comparator, entry)
+    for entry in entries.values() {
+        let comparator = entry.get("comparator").and_then(Value::as_i64).unwrap_or(0);
+        let better = match best {
+            None => true,
+            Some((incumbent, _)) if want_max => comparator > incumbent,
+            Some((incumbent, _)) => comparator < incumbent,
+        };
+        if better {
+            best = Some((comparator, entry));
+        }
+    }
+    best.and_then(|(_, entry)| entry.get("payload").cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// `list(map)`: an array of every keyed-map entry's `payload` (or the array as-is
+/// when already an array). Empty array for anything else.
+#[must_use]
+pub fn list(collection: &Value) -> Value {
+    match collection {
+        Value::Object(entries) => Value::Array(
+            entries
+                .values()
+                .map(|entry| entry.get("payload").cloned().unwrap_or(Value::Null))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.clone()),
+        _ => Value::Array(Vec::new()),
+    }
+}
+
+/// `get(value, path)`: dotted-path lookup into a value — path into a call result,
+/// e.g. `get(latest(state.attempts), 'connector')`. `Null` on any miss.
+#[must_use]
+pub fn get_field(value: &Value, path: &str) -> Value {
+    json_util::get_path(value, path).cloned().unwrap_or(Value::Null)
 }

@@ -13,11 +13,12 @@ use crate::{
     config::Settings,
     enrichment::Enrichment,
     errors::{StitcherError, StitcherResult},
-    filters, inspect, kafka,
+    inspect, kafka,
     kafka::{consumer::OwnedRecord, producer::KafkaProducer},
     merge::Merge,
     metrics,
-    processor::{Key, OutMsg, Processor, Sign, Transformer},
+    processor::{Key, OutMsg, Processor, Sign},
+    projection::{Projection, ProjectionContext},
     store::{PartitionRef, Store},
     util,
 };
@@ -25,8 +26,14 @@ use crate::{
 /// One consumed batch straight off the rdkafka stream (payloads not yet owned).
 type RawBatch<'a> = Vec<rdkafka::error::KafkaResult<rdkafka::message::BorrowedMessage<'a>>>;
 
-/// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`].
-pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()> {
+/// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
+/// change through `projection` (the output seam — [`crate::projection::StateLogger`] by
+/// default, or a plugged-in consumer such as the `transformer` crate).
+pub async fn run<P: Processor>(
+    proc: P,
+    projection: Box<dyn Projection>,
+    settings: Settings,
+) -> StitcherResult<()> {
     metrics::spawn_server(&settings.server.host, settings.server.port)?;
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
@@ -47,12 +54,12 @@ pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()
     let producer = kafka::producer::build(&settings)?;
     let enrichment = Enrichment::spawn_reloader(&settings.enrichment)?;
     let guard = consumer.guard();
-    let _ = enrichment; // join-maps available for future enriched processors
     let inspector = inspect::Inspect::from_cfg(&settings.debug);
     let ctx = BatchCtx {
         producer: &producer,
-        retention: filters::RetentionTable::from_filters(&settings.filters),
         inspector: &inspector,
+        projection: projection.as_ref(),
+        enrichment: &enrichment,
         read_concurrency: settings.read_concurrency,
         dry_run: settings.debug.dry_run,
     };
@@ -120,57 +127,6 @@ pub async fn run<P: Processor>(proc: P, settings: Settings) -> StitcherResult<()
     Ok(())
 }
 
-/// Stateless variant (PLAN §18): consume → `transform` → produce → commit. No store.
-pub async fn run_transformer<T: Transformer>(
-    transformer: T,
-    settings: Settings,
-) -> StitcherResult<()> {
-    metrics::spawn_server(&settings.server.host, settings.server.port)?;
-    // A transformer has no state store; the consumer still wants the rebalance hook —
-    // hand it the no-op local store.
-    let store: Arc<dyn Store> = Arc::new(NoStore);
-    let consumer = kafka::consumer::build(&settings, store)?;
-    let producer = kafka::producer::build(&settings)?;
-    let guard = consumer.guard();
-    let inspector = inspect::Inspect::from_cfg(&settings.debug);
-    let dry_run = settings.debug.dry_run;
-
-    let (_shutdown_rx, batches) = spawn_source(&consumer, &settings);
-    let mut batches = Box::pin(batches);
-
-    let mut transport_failures: u32 = 0;
-
-    while let Some(batch) = StreamExt::next(&mut batches).await {
-        // `_batch` decrements `in_flight` when dropped (see `run`).
-        let Some(_batch) = guard.begin_batch() else {
-            // same replay-safety argument as `run` (see there)
-            tracing::warn!(
-                "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
-            );
-            break;
-        };
-        let started = Instant::now();
-        let watermarks = kafka::consumer::batch_watermarks(&batch);
-        // process the GOOD records; report (don't throw) the transport error so the
-        // finished records still get produced + committed.
-        let outcome =
-            process_batch_transformer(&transformer, &producer, &inspector, dry_run, batch).await?;
-        if !dry_run {
-            consumer.commit(&watermarks).await?;
-        }
-        metrics::batch_process_seconds(started.elapsed().as_secs_f64());
-        metrics::batches();
-
-        if !on_transport_error(outcome.transport_error, &mut transport_failures).await {
-            break;
-        }
-    }
-    producer
-        .flush(std::time::Duration::from_secs(10))
-        .attach_printable("producer flush on shutdown")?;
-    tracing::info!("transformer shutdown complete");
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // shared plumbing
@@ -304,14 +260,28 @@ fn spawn_signal_task(tx: tokio::sync::watch::Sender<bool>) {
 struct BatchCtx<'a> {
     /// Sink producer (+ DLQ).
     producer: &'a KafkaProducer,
-    /// Retention rules resolved once per run, not per batch.
-    retention: filters::RetentionTable,
     /// Inspect tap.
     inspector: &'a inspect::Inspect,
+    /// Output seam: each state change is projected here (default logs, transformer fans out).
+    projection: &'a dyn Projection,
+    /// Enrichment join map (handed to the projection via [`ProjectionContext`]).
+    enrichment: &'a Enrichment,
     /// Store read fan-out width.
     read_concurrency: usize,
     /// Inspect dry-run: no DLQ, no produce, no persist (the caller skips the commit).
     dry_run: bool,
+}
+
+/// Serialize a state to a JSON value for the transform; a serialize failure (unreachable
+/// for these types) logs and yields `Null` so the pipeline stays panic-free.
+fn state_to_value<S: serde::Serialize>(state: &S) -> serde_json::Value {
+    match serde_json::to_value(state) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "transform: state serialize failed; skipping projections");
+            serde_json::Value::Null
+        }
+    }
 }
 
 /// Outcome of one batch: processed work is persisted; a transport error is reported here
@@ -401,8 +371,8 @@ async fn process_batch<P: Processor>(
                         }
                     }
                 }
-                // version ≠ state_version ⇒ absent (PLAN §13)
-                _ => None,
+                Some((version, blob)) => proc.upcast(*version, blob), // older version: migrate, or (default) drop
+                None => None,
             };
             let had_stored = stored_state.is_some();
             // (b) inspect: `old` is rendered BEFORE `merge` consumes it (INSPECT.md)
@@ -413,10 +383,15 @@ async fn process_batch<P: Processor>(
                     Some(old) => ctx.inspector.render_state(old),
                     None => ctx.inspector.render_state(&empty),
                 });
+            let pctx = ProjectionContext {
+                now_secs: now,
+                enrichment: ctx.enrichment,
+            };
             let merged = match stored_state {
                 Some(old) => {
                     metrics::states_merged();
-                    msgs.extend(proc.encode(&old, Sign::Minus));
+                    // -1 delta on the previously stored state
+                    msgs.extend(ctx.projection.project(&state_to_value(&old), Sign::Minus, &pctx));
                     old.merge(local)
                 }
                 None => local,
@@ -429,33 +404,23 @@ async fn process_batch<P: Processor>(
                     &ctx.inspector.render_state(&merged),
                 );
             }
-            msgs.extend(proc.encode(&merged, Sign::Plus));
+            // +1 delta: serialize merged → Value once, reuse it for the persist blob
+            let merged_value = state_to_value(&merged);
+            msgs.extend(ctx.projection.project(&merged_value, Sign::Plus, &pctx));
             if ctx.dry_run {
-                continue; // inspect tap: no state serialization/persist either
+                continue; // inspect tap: no persist
             }
-            let blob = serde_json::to_vec(&merged)
+            let blob = serde_json::to_vec(&merged_value)
                 .change_context(StitcherError::Codec("serialize merged state".into()))?;
             let part = key_partition.get(&key).cloned().unwrap_or(PartitionRef {
                 topic: String::new(),
                 partition: 0,
             });
-            tracing::debug!(
-                key = %key.as_str(),
-                had_stored,
-                blob_bytes = blob.len(),
-                "state merged + serialized"
-            );
+            tracing::debug!(key = %key.as_str(), had_stored, blob_bytes = blob.len(), "state persisted");
             merged_states.push((key, blob, part));
         }
-        // (c) inspect: outgoing sink records, pre-retention (everything produced)
+        // retention is the projection's concern; produce everything it returned
         ctx.inspector.outgoing(&msgs);
-        msgs.retain(|m| {
-            let keep = ctx.retention.keep(m, now);
-            if !keep {
-                metrics::messages_filtered("retention");
-            }
-            keep
-        });
 
         if !ctx.dry_run {
             // 6. produce first (consumers see deltas only if the state will also persist —
@@ -481,35 +446,6 @@ async fn process_batch<P: Processor>(
         }
     }
 
-    Ok(BatchOutcome {
-        transport_error: transport_err,
-    })
-}
-
-/// One stateless batch (PLAN §18): transform → produce. No store; the caller commits.
-async fn process_batch_transformer<T: Transformer>(
-    transformer: &T,
-    producer: &KafkaProducer,
-    inspector: &inspect::Inspect,
-    dry_run: bool,
-    batch: RawBatch<'_>,
-) -> StitcherResult<BatchOutcome> {
-    let (records, transport_err) = collect_records(batch);
-    let mut out: Vec<OutMsg> = Vec::new();
-    for rec in &records {
-        inspector.incoming(&rec.topic, rec.partition, rec.offset, None, &rec.payload);
-        let msgs = transformer.transform(&rec.payload);
-        if msgs.is_empty() {
-            classify_and_route(producer, rec, dry_run).await?;
-        } else {
-            metrics::messages_decoded();
-            out.extend(msgs);
-        }
-    }
-    inspector.outgoing(&out);
-    if !dry_run {
-        producer.send_all(&out).await?;
-    }
     Ok(BatchOutcome {
         transport_error: transport_err,
     })

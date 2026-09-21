@@ -42,8 +42,6 @@ rdkafka      = { version = "0.36", features = ["cmake-build", "ssl", "gssapi-ven
 # stores
 scylla           = "1"      # pure-Rust CQL driver (ScyllaDB + Cassandra)
 rocksdb          = { version = "0.22", features = ["multi-threaded-cf"] }   # bundles RocksDB C++ (needs clang + cmake)
-aws-sdk-dynamodb = "1"      # stub backend only (feature `dynamodb`)
-aws-config       = "1"
 
 # serialization
 serde          = { version = "1", features = ["derive"] }
@@ -58,6 +56,7 @@ clap           = { version = "4", features = ["derive"] }
 # observability
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3", features = ["json", "env-filter", "fmt"] }
+tracing-appender     = "0.2"    # non-blocking writer (flush on shutdown via WorkerGuard)
 prometheus           = "0.13"   # the metrics stack (PLAN decision #22)
 actix-web            = "4"
 
@@ -70,14 +69,11 @@ arc-swap            = "1"
 async-trait         = "0.1"
 time                = { version = "0.3", features = ["parsing", "formatting", "macros"] }
 
-# proc-macro internals
-syn          = { version = "2", features = ["full", "parsing", "printing"] }
-quote        = "1"
-proc-macro2  = "1"
+# dsl grammar
 pest         = "2"
 pest_derive  = "2"
 
-# testing (re-add when the deferred test suite lands: proptest, trybuild)
+# testing (deterministic unit layer in-tree; property-based still deferred: proptest, trybuild)
 
 [profile.release]
 strip = true
