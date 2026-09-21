@@ -45,10 +45,11 @@ pub struct Settings {
     pub store: StoreCfg,
     /// State-machine config for the generic binary (`state.yaml`, lantern #37).
     pub state: Option<StateCfg>,
+    /// Config-driven output transformer (`transformer.toml`); absent ⇒ the
+    /// processor's passthrough `encode` is used.
+    pub transform: TransformCfg,
     /// Enrichment join-map reload.
     pub enrichment: Enrichment,
-    /// Per-sink output config, keyed by sink name (`[filters.intent]` etc.).
-    pub filters: HashMap<String, Filter>,
     /// Tenant allow-list (== `--tenant-id`).
     pub tenant_ids: Vec<String>,
     /// Inspect mode (dev/staging introspection; INSPECT.md).
@@ -92,6 +93,33 @@ pub enum LogFormat {
     HumanReadable,
 }
 
+/// Extra librdkafka properties. `Debug` redacts values whose key looks secret so a startup
+/// config dump can't leak `sasl.password` / `ssl.key.password`.
+#[derive(Clone, Default, Deserialize)]
+#[serde(transparent)]
+pub struct KafkaExtra(pub HashMap<String, String>);
+
+impl std::ops::Deref for KafkaExtra {
+    type Target = HashMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for KafkaExtra {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = f.debug_map();
+        for (key, value) in &self.0 {
+            if key.contains("password") || key.contains("secret") {
+                map.entry(key, &"***");
+            } else {
+                map.entry(key, value);
+            }
+        }
+        map.finish()
+    }
+}
+
 /// Source Kafka.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -110,7 +138,7 @@ pub struct SourceKafka {
     /// `0` disables.
     pub statistics_interval_ms: u64,
     /// Extra librdkafka consumer properties (e.g. `partition.assignment.strategy`).
-    pub extra: HashMap<String, String>,
+    pub extra: KafkaExtra,
 }
 
 /// Sink Kafka.
@@ -120,7 +148,7 @@ pub struct SinkKafka {
     /// `bootstrap.servers`.
     pub brokers: Vec<String>,
     /// Extra librdkafka producer properties.
-    pub extra: HashMap<String, String>,
+    pub extra: KafkaExtra,
     /// Dead-letter topic for malformed records (PLAN §23).
     pub dlq_topic: String,
     /// Delivery timeout per record, seconds.
@@ -156,8 +184,6 @@ pub enum Backend {
     /// `ScyllaDB` / Cassandra via the `scylla` CQL driver.
     #[default]
     Cql,
-    /// `DynamoDB` (stubbed; PLAN §4).
-    Dynamodb,
 }
 
 /// CQL connection settings.
@@ -200,6 +226,14 @@ pub struct StateCfg {
     pub config_file: PathBuf,
 }
 
+/// Output-transformer config (the generic binary's `transformer.toml`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TransformCfg {
+    /// Path to `transformer.toml`; absent ⇒ passthrough (the processor's `encode`).
+    pub config_file: Option<PathBuf>,
+}
+
 /// Enrichment join-map reload (== `--config-file` / `--sleep-in-sec`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -208,17 +242,6 @@ pub struct Enrichment {
     pub config_file: String,
     /// Background reload interval.
     pub reload_secs: u64,
-}
-
-/// One sink's emission config.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Filter {
-    /// Sink topic (e.g. `stitcher-intent-events`).
-    pub topic: String,
-    /// Drop records older than this many days.
-    pub retention_days: i64,
-    /// JSON field holding the record's epoch-seconds timestamp.
-    pub retention_key: String,
 }
 
 /// Inspect mode (`stitcher/INSPECT.md`): dev/staging introspection aid. Off by default;
@@ -299,8 +322,8 @@ impl Default for Settings {
             batch: Batch::default(),
             store: StoreCfg::default(),
             state: None,
+            transform: TransformCfg::default(),
             enrichment: Enrichment::default(),
-            filters: HashMap::new(),
             tenant_ids: Vec::new(),
             debug: DebugCfg::default(),
             shutdown_grace_secs: None,
@@ -322,7 +345,7 @@ impl Default for Server {
 impl Default for LogCfg {
     fn default() -> Self {
         Self {
-            level: "info".to_string(),
+            level: "info,rdkafka=warn,scylla=warn,actix_web=warn,actix_server=warn".to_string(),
             format: LogFormat::Json,
         }
     }
@@ -336,7 +359,7 @@ impl Default for SourceKafka {
             consumer_group: "stitcher".to_string(),
             auto_offset_reset: "earliest".to_string(),
             statistics_interval_ms: 10_000,
-            extra: HashMap::new(),
+            extra: KafkaExtra::default(),
         }
     }
 }
@@ -345,7 +368,7 @@ impl Default for SinkKafka {
     fn default() -> Self {
         Self {
             brokers: Vec::new(),
-            extra: HashMap::new(),
+            extra: KafkaExtra::default(),
             dlq_topic: "stitcher-dlq".to_string(),
             delivery_timeout_secs: 30,
         }
@@ -419,29 +442,12 @@ impl Settings {
         if !(0.0..=1.0).contains(&self.debug.sample) {
             return fail("debug.sample must be within 0.0..=1.0");
         }
-        match self.store.backend {
-            Backend::Cql => {
-                if self.store.cql.hosts.is_empty() {
-                    return fail("store.cql.hosts must be non-empty for backend=cql");
-                }
-                if self.store.cql.keyspace.is_empty() || self.store.cql.table.is_empty() {
-                    return fail("store.cql.keyspace and store.cql.table must be non-empty");
-                }
-            }
-            Backend::Dynamodb => {} // stub: validated when implemented (PLAN §4)
+        let Backend::Cql = self.store.backend;
+        if self.store.cql.hosts.is_empty() {
+            return fail("store.cql.hosts must be non-empty");
         }
-        for (name, filter) in &self.filters {
-            if filter.topic.is_empty() {
-                return fail("filters entries must set a topic");
-            }
-            if filter.retention_key.is_empty() {
-                let msg = format!("filters.{name}.retention_key must be non-empty");
-                return fail(&msg);
-            }
-            if filter.retention_days <= 0 {
-                let msg = format!("filters.{name}.retention_days must be > 0");
-                return fail(&msg);
-            }
+        if self.store.cql.keyspace.is_empty() || self.store.cql.table.is_empty() {
+            return fail("store.cql.keyspace and store.cql.table must be non-empty");
         }
         Ok(())
     }

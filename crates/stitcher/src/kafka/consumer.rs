@@ -301,7 +301,7 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
             "statistics.interval.ms",
             cfg.source_kafka.statistics_interval_ms.to_string(),
         );
-    for (k, v) in &cfg.source_kafka.extra {
+    for (k, v) in cfg.source_kafka.extra.iter() {
         conf.set(k, v);
     }
 

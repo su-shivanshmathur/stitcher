@@ -6,7 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-stitcher_macro = { path = "../stitcher_macro" }
 stitcher-dsl = { path = "../dsl" }
 
 tokio.workspace = true
@@ -24,6 +23,7 @@ clap.workspace = true
 
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 
 thiserror.workspace = true
 error-stack.workspace = true
@@ -35,8 +35,6 @@ time.workspace = true
 # backends (feature-gated)
 scylla           = { workspace = true, optional = true }
 rocksdb          = { workspace = true, optional = true }
-aws-sdk-dynamodb = { workspace = true, optional = true }
-aws-config       = { workspace = true, optional = true }
 
 # observability: one crates.io stack (PLAN decision #22) —
 # tracing-subscriber logging + prometheus metrics scraped via actix-web
@@ -47,7 +45,6 @@ actix-web          = { workspace = true }
 default        = ["cql", "rocks"]
 cql            = ["dep:scylla"]
 rocks          = ["dep:rocksdb"]
-dynamodb       = ["dep:aws-sdk-dynamodb", "dep:aws-config"]        # stub backend
 
 [lints]
 workspace = true

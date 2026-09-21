@@ -130,7 +130,7 @@ pub fn build(cfg: &config::Settings) -> StitcherResult<KafkaProducer> {
     conf.set("bootstrap.servers", cfg.sink_kafka.brokers.join(","))
         .set("enable.idempotence", "true")
         .set("acks", "all");
-    for (k, v) in &cfg.sink_kafka.extra {
+    for (k, v) in cfg.sink_kafka.extra.iter() {
         conf.set(k, v);
     }
     let producer: FutureProducer = conf

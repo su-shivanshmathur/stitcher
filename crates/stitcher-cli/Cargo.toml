@@ -1,0 +1,27 @@
+[package]
+name = "stitcher-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stitcher"
+path = "src/main.rs"
+
+[features]
+default = ["transform"]
+# `transform` links the transformer crate; without it the binary is pure state
+# management (the state logger).
+transform = ["dep:transformer"]
+
+[dependencies]
+stitcher = { path = "../stitcher" }
+transformer = { path = "../transformer", optional = true }
+
+tokio.workspace = true
+error-stack.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

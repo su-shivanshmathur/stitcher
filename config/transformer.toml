@@ -1,0 +1,38 @@
+# Output transformer for the `intent` state (config/intent.yaml) → N Kafka topics.
+# Runtime, versioned, loaded once at boot; a change here is applied on restart
+# (no hot-reload). Wired via `[transform] config_file` in the env config.
+version = 1
+
+# intent: one row per payment, enriched with the LATEST attempt's connector.
+[[stream]]
+name = "intent"
+topic = "stitcher-intent-events"
+sign_flag = true
+gate = "state.payment_intent.payload != null"          # == isStateProper
+retention = { days = 182, key = "created_at" }          # created_at is top-level ⇒ fires
+key = "state.payment_intent.payload.payment_id"
+[stream.fields]
+payment_id  = "meaningful(state.payment_intent.payload.payment_id)"
+merchant_id = "meaningful(state.payment_intent.payload.merchant_id)"
+amount      = "round(state.payment_intent.payload.amount)"
+created_at  = "state.payment_intent.payload.created_at"
+log_count   = "state.log_count"
+connector   = "get(latest(state.payment_attempt_object), 'connector')"   # cross-entity reduce
+attempts    = "list(state.payment_attempt_object)"
+
+# attempt: one row per attempt (explode the map) + intent-level common fields.
+[[stream]]
+name = "attempt"
+topic = "stitcher-attempt-events"
+sign_flag = true
+retention = { days = 182, key = "created_at" }
+explode = "state.payment_attempt_object"
+key = "each.payload.attempt_id"
+[stream.common]
+payment_id  = "state.payment_intent.payload.payment_id"
+merchant_id = "state.payment_intent.payload.merchant_id"
+[stream.element]
+attempt_id = "meaningful(each.payload.attempt_id)"
+connector  = "meaningful(each.payload.connector)"
+amount     = "round(each.payload.amount)"
+created_at = "each.payload.created_at"

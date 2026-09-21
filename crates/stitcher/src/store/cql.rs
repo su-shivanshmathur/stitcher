@@ -6,7 +6,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use error_stack::ResultExt;
 use futures::{StreamExt, TryStreamExt};
 use scylla::{
-    client::{session::Session, session_builder::SessionBuilder},
+    client::{session::Session, session_builder::SessionBuilder, Compression},
     errors::TranslationError,
     policies::address_translator::{AddressTranslator, UntranslatedPeer},
     statement::{prepared::PreparedStatement, Consistency},
@@ -74,7 +74,8 @@ impl CqlStore {
         validate_ident("keyspace", &cfg.keyspace)?;
         validate_ident("table", &cfg.table)?;
 
-        let mut builder = SessionBuilder::new();
+        // Wire-level compression only; stored blobs remain raw JSON (PLAN §13).
+        let mut builder = SessionBuilder::new().compression(Some(Compression::Lz4));
         for host in &cfg.hosts {
             builder = builder.known_node(format!("{}:{}", host, cfg.port));
         }

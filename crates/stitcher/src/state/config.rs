@@ -29,8 +29,8 @@ pub struct FilterProg {
     /// Required non-empty paths; each entry carries `|`-separated alternatives
     /// (any one present satisfies the requirement).
     pub require: Vec<Vec<String>>,
-    /// Reject records whose required string fields contain this substring (only
-    /// checked while iterating `require` — inert when `require` is empty, like codegen).
+    /// Reject records whose required string fields contain this substring (checked while
+    /// iterating `require`; inert when `require` is empty).
     pub reject_if_contains: Option<String>,
     /// Allowed `log_type` values (empty = no check).
     pub log_type_in: Vec<String>,
@@ -79,26 +79,18 @@ pub enum FieldProg {
         /// Value expression.
         value: Expr,
     },
+    /// Keep the FIRST meaningful value (write-once / sticky).
+    Once {
+        /// Predicate gating extraction.
+        when: Option<Expr>,
+        /// Value expression.
+        value: Expr,
+    },
     /// Sum counter; contributes 1 per admitted (and gated) record.
     Counter {
         /// Predicate gating the contribution.
         when: Option<Expr>,
     },
-}
-
-/// One output sink, compiled (== the codegen `sinks:` entry).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SinkProg {
-    /// Sink name (diagnostics).
-    pub name: String,
-    /// Output topic.
-    pub topic: String,
-    /// State field feeding this sink.
-    pub field: String,
-    /// Map fields: one message per map entry.
-    pub fan_out: bool,
-    /// JSON path inside the field payload used as the Kafka record key.
-    pub key_path: Option<String>,
 }
 
 /// A fully compiled state schema.
@@ -116,8 +108,6 @@ pub struct Program {
     pub filter: FilterProg,
     /// Compiled state fields (ordered: deterministic state serialization).
     pub fields: BTreeMap<String, FieldProg>,
-    /// Compiled output sinks (ordered).
-    pub sinks: Vec<SinkProg>,
 }
 
 /// Load + compile a `state.yaml` from disk.
@@ -133,56 +123,11 @@ pub fn load(path: &Path) -> StitcherResult<Program> {
         .map_err(|e| error_stack::report!(StitcherError::Config(format!("{}: {e}", ctx()))))
 }
 
-/// Schema → [`Program`] (validation mirrors `stitcher_macro`'s codegen checks; sinks
-/// stay schema-side metadata for the transformer crate — lantern #36 — so only
-/// referenced-field coherence is checked here).
-fn compile(schema: &model::Schema) -> Result<Program, String> {
+/// Schema → [`Program`]: compile the key template, admission filter and merge-node fields.
+pub fn compile(schema: &model::Schema) -> Result<Program, String> {
     let err = |m: String| format!("[schema {}] {m}", schema.aggregate);
     if schema.aggregate.is_empty() {
         return Err(err("aggregate name must be non-empty".into()));
-    }
-    for sink in &schema.sinks {
-        let Some(field) = schema.fields.get(&sink.field) else {
-            return Err(err(format!(
-                "sink {:?} references unknown field {:?}",
-                sink.name, sink.field
-            )));
-        };
-        // fan_out iterates map entries; key_path reads `{field}.payload.{p}` — only a
-        // non-fan-out `latest_by` sink has that shape (mirrored in codegen `validate`).
-        if sink.fan_out && !matches!(field, model::Field::KeyedMap { .. }) {
-            return Err(err(format!(
-                "sink {:?}: fan_out requires a keyed_map field",
-                sink.name
-            )));
-        }
-        if sink.key_path.is_some()
-            && (sink.fan_out || !matches!(field, model::Field::LatestBy { .. }))
-        {
-            return Err(err(format!(
-                "sink {:?}: key_path requires a non-fan_out latest_by field",
-                sink.name
-            )));
-        }
-        // retention fields are consumed by the pipeline's per-topic config; when stated
-        // here we validate coherence so schema and config can't contradict silently.
-        match (sink.retention_days, &sink.retention_key) {
-            (Some(days), Some(key)) => {
-                if days <= 0 || key.is_empty() {
-                    return Err(err(format!(
-                        "sink {:?}: retention_days must be > 0 and retention_key non-empty",
-                        sink.name
-                    )));
-                }
-            }
-            (None, None) => {}
-            _ => {
-                return Err(err(format!(
-                    "sink {:?}: retention_days and retention_key must be set together",
-                    sink.name
-                )))
-            }
-        }
     }
     // A `|`-separated string → its trimmed, non-empty alternatives (first-present-wins
     // at admission/keying). Shared by `require`, `log_type_path` and `tenant_path`.
@@ -214,17 +159,6 @@ fn compile(schema: &model::Schema) -> Result<Program, String> {
         let compiled = compile_field(field).map_err(|e| err(format!("field {name:?}: {e}")))?;
         fields.insert(name.clone(), compiled);
     }
-    let sinks = schema
-        .sinks
-        .iter()
-        .map(|s| SinkProg {
-            name: s.name.clone(),
-            topic: s.topic.clone(),
-            field: s.field.clone(),
-            fan_out: s.fan_out,
-            key_path: s.key_path.clone(),
-        })
-        .collect();
     Ok(Program {
         aggregate: schema.aggregate.clone(),
         version: schema.version,
@@ -232,11 +166,10 @@ fn compile(schema: &model::Schema) -> Result<Program, String> {
         key: compile_key(&schema.primary_key),
         filter,
         fields,
-        sinks,
     })
 }
 
-/// Field node → compiled field (mirror of `stitcher_macro`'s `field_build`).
+/// Field node → compiled field.
 fn compile_field(field: &model::Field) -> Result<FieldProg, String> {
     match field {
         model::Field::LatestBy {
@@ -276,6 +209,10 @@ fn compile_field(field: &model::Field) -> Result<FieldProg, String> {
             when: compile_when(when)?,
             value: stitcher_dsl::expr::compile(value)?,
         }),
+        model::Field::Once { when, value } => Ok(FieldProg::Once {
+            when: compile_when(when)?,
+            value: stitcher_dsl::expr::compile(value)?,
+        }),
         model::Field::Counter { when } => Ok(FieldProg::Counter {
             when: compile_when(when)?,
         }),
@@ -300,8 +237,7 @@ fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
     }
 }
 
-/// `"{log.a}-{log.b}"` → segments (mirror of `stitcher_macro`'s `gen_key_body`,
-/// including the unbalanced-`{`-is-literal rule).
+/// `"{log.a}-{log.b}"` → key-template segments (an unbalanced `{` is treated as a literal).
 fn compile_key(template: &str) -> Vec<KeySeg> {
     let mut segments = Vec::new();
     let mut rest = template;
@@ -335,3 +271,4 @@ fn compile_key(template: &str) -> Vec<KeySeg> {
     }
     segments
 }
+

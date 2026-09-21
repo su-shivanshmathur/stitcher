@@ -13,8 +13,8 @@ decode_filter:
   reject_if_contains: undefined
   # discriminator read first-present-wins: lifecycle events carry `log_type`,
   # API events carry `api_flow` — both feed the same payment session.
-  log_type_in: [payment_intent, payment_attempt, refund, dispute, PaymentsCreate]
-  log_type_path: "log_type|api_flow"
+  log_type_in: [payment_intent, payment_attempt, refund, dispute, PaymentsCreate, Authorize]
+  log_type_path: "log_type|api_flow|flow"
   # tenant sits under `log` on lifecycle events, top-level on API events.
   tenant_path: "log.tenant_id|tenant_id"
 fields:
@@ -49,7 +49,7 @@ fields:
       payload: "log"
   api_event_object:
     node: keyed_map
-    when: "api_flow == 'PaymentsCreate'"
+    when: "api_flow == 'PaymentsCreate' || flow == 'Authorize'"
     key: "meaningful(created_at_timestamp)"
     value:
       node: latest_by

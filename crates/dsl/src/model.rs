@@ -25,9 +25,6 @@ pub struct Schema {
     pub decode_filter: DecodeFilter,
     /// State fields, keyed by name.
     pub fields: BTreeMap<String, Field>,
-    /// Output sinks (ordered).
-    #[serde(default)]
-    pub sinks: Vec<Sink>,
 }
 
 /// Record admission filter.
@@ -84,6 +81,15 @@ pub enum Field {
         /// Value expression.
         value: String,
     },
+    /// Keep the FIRST meaningful value ever seen (`Once` — write-once / sticky):
+    /// once assigned it never changes. Persisted, so the assignment is stable
+    /// across restarts (e.g. an A/B variant stamped onto every later event).
+    Once {
+        /// Predicate gating extraction.
+        when: Option<String>,
+        /// Value expression (the value to freeze on first sight).
+        value: String,
+    },
     /// `Sum` counter; contributes 1 per admitted record.
     Counter {
         /// Optional gating predicate.
@@ -96,23 +102,3 @@ pub enum Field {
     },
 }
 
-/// One output sink.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Sink {
-    /// Sink name (diagnostics).
-    pub name: String,
-    /// Output topic.
-    pub topic: String,
-    /// State field feeding this sink.
-    pub field: String,
-    /// Map fields: one message per map entry.
-    #[serde(default)]
-    pub fan_out: bool,
-    /// JSON path inside the field payload used as the Kafka record key.
-    pub key_path: Option<String>,
-    /// Retention in days (informational; the pipeline filters by topic config).
-    pub retention_days: Option<i64>,
-    /// Timestamp field for retention.
-    pub retention_key: Option<String>,
-}

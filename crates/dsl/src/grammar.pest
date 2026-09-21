@@ -1,5 +1,4 @@
-// DSL expression grammar (v1) — pure, total (PLAN §Schema-driven processors).
-// Compiled into processors by `stitcher_macro::schema!`.
+// DSL expression grammar (v1) — pure, total. Interpreted by `stitcher::eval`.
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
@@ -7,11 +6,21 @@ WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 // anchor, pest happily returns a prefix match — a path like `log_type` used to
 // truncate at the literal `log` prefix and silently drop the rest of the
 // expression.
-file    = { SOI ~ expr ~ EOI }
-expr    = { term ~ (bin_op ~ term)* }
-term    = { literal | call | path | root | unary | "(" ~ expr ~ ")" }
+file    = { SOI ~ or ~ EOI }
+
+// Precedence, loosest to tightest: `||` binds looser than `&&`, which binds
+// looser than the comparison operators. `||`/`&&` are left-associative folds
+// (every `or` child is OR-joined, every `and` child AND-joined); comparison is
+// NON-associative — at most one `cmp_op` per level, so `a == b == c` is a parse
+// error and alternations like `a == b || c == d` group as `(a==b) || (c==d)`.
+// Only `cmp_op` is a named rule (the walker reads which comparison it is); the
+// `||`/`&&` literals are implicit in the fold.
+or      = { and ~ ("||" ~ and)* }
+and     = { cmp ~ ("&&" ~ cmp)* }
+cmp     = { term ~ (cmp_op ~ term)? }
+term    = { literal | call | path | root | unary | "(" ~ or ~ ")" }
 unary   = { "!" ~ term }
-call    = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+call    = { ident ~ "(" ~ (or ~ ("," ~ or)*)? ~ ")" }
 // Identifier-rooted path: the record envelope carries fields next to the `log`
 // payload (`log_type`, `tenant_id`, …), so paths are not `log`-prefixed only —
 // same resolution space as the key template / decode-filter paths. Atomic so
@@ -27,4 +36,4 @@ number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
 bool    = @{ "true" | "false" }
 null    = @{ "null" }
 ident   = @{ ('a'..'z' | 'A'..'Z' | "_") ~ ('a'..'z' | 'A'..'Z' | '0'..'9' | "_")* }
-bin_op  = { "==" | "!=" | "<=" | ">=" | "<" | ">" | "&&" | "||" }
+cmp_op  = { "==" | "!=" | "<=" | ">=" | "<" | ">" }

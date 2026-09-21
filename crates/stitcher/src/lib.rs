@@ -4,6 +4,7 @@ pub mod builtins;
 pub mod codec;
 pub mod config;
 pub mod enrichment;
+pub mod eval;
 pub mod errors;
 pub mod filters;
 pub mod inspect;
@@ -13,6 +14,7 @@ pub mod merge;
 pub mod metrics;
 pub mod pipeline;
 pub mod processor;
+pub mod projection;
 pub mod secret;
 pub mod state;
 pub mod store;
@@ -20,8 +22,6 @@ pub mod telemetry;
 pub mod util;
 
 pub use errors::{StitcherError, StitcherResult};
-pub use pipeline::{run, run_transformer};
-pub use processor::{Key, OutMsg, Processor, Sign, Transformer};
-
-// re-export the schema! proc-macro so consumers write `stitcher::schema!(...)` (PLAN §24)
-pub use stitcher_macro::schema;
+pub use pipeline::run;
+pub use processor::{Key, OutMsg, Processor, Sign};
+pub use projection::{Projection, ProjectionContext, StateLogger};

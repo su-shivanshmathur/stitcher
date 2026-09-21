@@ -1,16 +1,16 @@
-//! Runtime interpreter: a [`Processor`] driven entirely by a compiled [`Program`]
-//! (lantern #37). Evaluation mirrors `stitcher_macro`'s generated code expression for
-//! expression — the oracle/codegen/interpreter parity smoke (PLAN #39) pins that.
+//! Runtime interpreter: a [`Processor`] driven by a compiled [`Program`], evaluating DSL
+//! expressions through the shared [`crate::eval`] walker.
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::Value;
-use stitcher_dsl::expr::{BinOp, Builtin, Expr};
+use stitcher_dsl::expr::Expr;
 
 use crate::builtins;
+use crate::eval::EvalContext;
 use crate::json_util;
 use crate::merge::MergeValue;
-use crate::processor::{Key, OutMsg, Processor, Sign};
+use crate::processor::{Key, Processor};
 use crate::state::config::{FieldProg, KeySeg, Program};
 
 /// Schema-driven `Processor` over [`MergeValue`] state: decode, merge and sink
@@ -156,52 +156,6 @@ impl Processor for ConfigProcessor {
         self.decode_with_key(raw).map(|(_, s)| s)
     }
 
-    fn encode(&self, state: &Self::State, sign: Sign) -> Vec<OutMsg> {
-        // mirror of the codegen's `gen_sink`: gate on the field carrying state, then
-        // fan out map entries or emit one record per sink.
-        let mut out = Vec::new();
-        let state_fields = match state {
-            MergeValue::Map(fields) => fields,
-            _ => return out,
-        };
-        let sign_flag = sign.value();
-        for sink in &self.prog.sinks {
-            let Some(value) = state_fields.get(&sink.field) else {
-                continue; // absent ⇔ identity ⇔ gate closed
-            };
-            if value.is_identity() {
-                continue; // == typed is_default/is_empty/is_none/is_zero gates
-            }
-            if sink.fan_out {
-                if let MergeValue::Map(entries) = value {
-                    for (entry_key, entry) in entries {
-                        let mut obj = serde_json::Map::with_capacity(3);
-                        obj.insert("sign_flag".to_string(), Value::from(sign_flag));
-                        obj.insert("key".to_string(), Value::String(entry_key.clone()));
-                        obj.insert(sink.field.clone(), entry.to_value_full());
-                        out.push(out_msg(&sink.topic, entry_key.clone(), &Value::Object(obj)));
-                    }
-                }
-            } else {
-                let mut obj = serde_json::Map::with_capacity(2);
-                obj.insert("sign_flag".to_string(), Value::from(sign_flag));
-                obj.insert(sink.field.clone(), value.to_value_full());
-                let payload = Value::Object(obj);
-                let key = match &sink.key_path {
-                    Some(key_path) => {
-                        let full = format!("{}.payload.{}", sink.field, key_path);
-                        json_util::get_str(&payload, &full)
-                            .unwrap_or(&sink.field)
-                            .to_string()
-                    }
-                    None => sink.field.clone(),
-                };
-                out.push(out_msg(&sink.topic, key, &payload));
-            }
-        }
-        out
-    }
-
     fn decode_with_key(&self, raw: &[u8]) -> Option<(Key, Self::State)> {
         let record: Value = serde_json::from_slice(raw).ok()?;
         self.admit(&record)?;
@@ -260,6 +214,18 @@ fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
                 None => MergeValue::Null,
             }
         }
+        FieldProg::Once { when, value } => {
+            if let Some(when_expr) = when {
+                if !builtins::truthy(&eval(when_expr, record)) {
+                    return MergeValue::Null; // == FirstWrite(None)
+                }
+            }
+            let value = eval(value, record);
+            match builtins::meaningful(&value) {
+                Some(_) => MergeValue::Once(value),
+                None => MergeValue::Null,
+            }
+        }
         FieldProg::Counter { when } => {
             let counts_this_record = match when {
                 Some(when_expr) => builtins::truthy(&eval(when_expr, record)),
@@ -303,6 +269,11 @@ fn decode_field(field: &FieldProg, stored: &Value) -> Option<MergeValue> {
         } else {
             MergeValue::Leaf(stored.clone())
         }),
+        FieldProg::Once { .. } => Some(if stored.is_null() {
+            MergeValue::Null
+        } else {
+            MergeValue::Once(stored.clone())
+        }),
         FieldProg::Counter { .. } => Some(MergeValue::Counter(stored.as_i64()?)),
     }
 }
@@ -317,84 +288,27 @@ fn decode_latest_by(v: &Value) -> Option<MergeValue> {
     })
 }
 
-/// Expression evaluation, mirroring the generated code's semantics. Operands are
-/// pure (total, side-effect-free), so codegen's short-circuiting `&&`/`||` and its
-/// double-evaluated `meaningful(x)` argument are unobservable against this eager,
-/// once-evaluated walk.
-fn eval(expr: &Expr, record: &Value) -> Value {
-    match expr {
-        // `$` — the whole record, stored/read as sent.
-        Expr::Root => record.clone(),
-        Expr::Path(p) => json_util::get_path(record, p)
+/// Evaluation scope for the state-build stage: paths resolve against one raw record,
+/// and enrichment is unavailable (`lookup` ⇒ `Null`, the [`EvalContext`] default).
+struct RecordScope<'a> {
+    record: &'a Value,
+}
+
+impl EvalContext for RecordScope<'_> {
+    fn resolve_path(&self, path: &str) -> Value {
+        json_util::get_path(self.record, path)
             .cloned()
-            .unwrap_or(Value::Null),
-        Expr::Str(s) => Value::String(s.clone()),
-        Expr::Int(i) => Value::from(*i),
-        Expr::Float(f) => Value::from(*f),
-        Expr::Bool(b) => Value::from(*b),
-        Expr::Null => Value::Null,
-        Expr::Not(inner) => Value::from(!builtins::truthy(&eval(inner, record))),
-        Expr::Bin(op, lhs, rhs) => {
-            let left = eval(lhs, record);
-            let right = eval(rhs, record);
-            match op {
-                BinOp::Eq => Value::from(builtins::json_eq(&left, &right)),
-                BinOp::Ne => Value::from(builtins::json_ne(&left, &right)),
-                BinOp::Lt => num_cmp(&left, &right, |x, y| x < y),
-                BinOp::Le => num_cmp(&left, &right, |x, y| x <= y),
-                BinOp::Gt => num_cmp(&left, &right, |x, y| x > y),
-                BinOp::Ge => num_cmp(&left, &right, |x, y| x >= y),
-                BinOp::And => Value::from(builtins::truthy(&left) && builtins::truthy(&right)),
-                BinOp::Or => Value::from(builtins::truthy(&left) || builtins::truthy(&right)),
-            }
-        }
-        Expr::Call(builtin, args) => {
-            let args: Vec<Value> = args.iter().map(|arg| eval(arg, record)).collect();
-            match (builtin, args.as_slice()) {
-                (Builtin::ParseTime, [arg]) => match builtins::parse_time(arg) {
-                    Some(parsed) => Value::from(parsed),
-                    None => Value::Null,
-                },
-                (Builtin::Meaningful, [arg]) => {
-                    if builtins::meaningful(arg).is_some() {
-                        arg.clone()
-                    } else {
-                        Value::Null
-                    }
-                }
-                (Builtin::Bucket, [value, width]) => Value::from(builtins::bucket(
-                    json_util::as_i64(value).unwrap_or(0),
-                    json_util::as_i64(width).unwrap_or(0),
-                )),
-                (Builtin::Round, [arg]) => Value::from(builtins::round_half_even(arg).unwrap_or(0)),
-                (Builtin::Trim, [arg]) => Value::from(builtins::trim(arg).unwrap_or_default()),
-                (Builtin::Lower, [arg]) => Value::from(builtins::lower(arg).unwrap_or_default()),
-                (Builtin::Coalesce, [first, second]) => match builtins::coalesce(first, second) {
-                    Some(value) => value.clone(),
-                    None => Value::Null,
-                },
-                // arity is checked at program-compile time
-                _ => Value::Null,
-            }
-        }
+            .unwrap_or(Value::Null)
+    }
+
+    fn root(&self) -> Value {
+        self.record.clone()
     }
 }
 
-/// Numeric comparison via `value_as_f64` views (non-numeric ⇒ false, like codegen).
-fn num_cmp(l: &Value, r: &Value, op: impl FnOnce(f64, f64) -> bool) -> Value {
-    Value::from(
-        match (builtins::value_as_f64(l), builtins::value_as_f64(r)) {
-            (Some(x), Some(y)) => op(x, y),
-            _ => false,
-        },
-    )
+/// Evaluate a compiled expression against one record via the shared [`crate::eval`]
+/// walker (semantics thus stay identical to the transform + generated code).
+fn eval(expr: &Expr, record: &Value) -> Value {
+    crate::eval::eval(expr, &RecordScope { record })
 }
 
-/// One sink record (payload bytes serialize like the generated code: `{}` on failure).
-fn out_msg(topic: &str, key: String, payload: &Value) -> OutMsg {
-    OutMsg {
-        topic: topic.to_string(),
-        key,
-        payload: serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec()),
-    }
-}

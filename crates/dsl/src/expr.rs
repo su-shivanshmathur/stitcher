@@ -1,7 +1,5 @@
-//! DSL expression AST (v1 vocabulary, PLAN §25): [`compile`] parses source once into a
-//! tree that is either evaluated at runtime (`stitcher::state::interp`) or transpiled
-//! (`stitcher_macro`). The walk mirrors `stitcher_macro`'s pest traversal rule-for-rule
-//! so both backends accept the same language.
+//! DSL expression AST: [`compile`] parses source once into a tree evaluated at runtime by
+//! the shared `stitcher::eval` walker.
 
 use pest::iterators::Pair;
 
@@ -28,6 +26,23 @@ pub enum BinOp {
     Or,
 }
 
+impl BinOp {
+    /// The comparison operator a `cmp_op` grammar token denotes, if any. `&&`/`||`
+    /// are folded implicitly (never tokens), so they are never produced here.
+    #[must_use]
+    pub fn from_comparison(token: &str) -> Option<Self> {
+        Some(match token {
+            "==" => Self::Eq,
+            "!=" => Self::Ne,
+            "<" => Self::Lt,
+            "<=" => Self::Le,
+            ">" => Self::Gt,
+            ">=" => Self::Ge,
+            _ => return None,
+        })
+    }
+}
+
 /// Built-in call (v1 vocabulary: `parse_time/meaningful/bucket/round/trim/lower/coalesce`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
@@ -45,6 +60,87 @@ pub enum Builtin {
     Lower,
     /// `coalesce(a, b)`
     Coalesce,
+    /// `latest(map)` — payload of the entry with the greatest stored comparator.
+    Latest,
+    /// `first(map)` — payload of the entry with the smallest stored comparator.
+    First,
+    /// `list(map)` — array of all entry payloads.
+    List,
+    /// `get(value, path)` — dotted-path lookup into a value.
+    Get,
+    /// `lookup(table, key)` — enrichment join (only meaningful in transform context).
+    Lookup,
+}
+
+impl Builtin {
+    /// Every builtin — the single source for name/arity lookups and diagnostics.
+    const ALL: [Self; 12] = [
+        Self::ParseTime,
+        Self::Meaningful,
+        Self::Bucket,
+        Self::Round,
+        Self::Trim,
+        Self::Lower,
+        Self::Coalesce,
+        Self::Latest,
+        Self::First,
+        Self::List,
+        Self::Get,
+        Self::Lookup,
+    ];
+
+    /// Canonical name as written in the DSL.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ParseTime => "parse_time",
+            Self::Meaningful => "meaningful",
+            Self::Bucket => "bucket",
+            Self::Round => "round",
+            Self::Trim => "trim",
+            Self::Lower => "lower",
+            Self::Coalesce => "coalesce",
+            Self::Latest => "latest",
+            Self::First => "first",
+            Self::List => "list",
+            Self::Get => "get",
+            Self::Lookup => "lookup",
+        }
+    }
+
+    /// Number of arguments the builtin accepts.
+    #[must_use]
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::ParseTime
+            | Self::Meaningful
+            | Self::Round
+            | Self::Trim
+            | Self::Lower
+            | Self::Latest
+            | Self::First
+            | Self::List => 1,
+            Self::Bucket | Self::Coalesce | Self::Get | Self::Lookup => 2,
+        }
+    }
+}
+
+impl std::str::FromStr for Builtin {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|builtin| builtin.name() == name)
+            .ok_or_else(|| {
+                let names = Self::ALL
+                    .iter()
+                    .map(|builtin| builtin.name())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                format!("unknown built-in {name:?}; v1: {names}")
+            })
+    }
 }
 
 /// Compiled expression tree over `serde_json::Value` records.
@@ -81,38 +177,32 @@ pub fn compile(src: &str) -> Result<Expr, String> {
     build(expr)
 }
 
-/// pest-pair → AST (structural mirror of `stitcher_macro::codegen::emit`).
+/// pest-pair → AST.
 fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
     match pair.as_rule() {
-        // entry wrapper (`file = { SOI ~ expr ~ EOI }`); descend to the expr
+        // entry wrapper (`file = { SOI ~ or ~ EOI }`); descend to the top expression
         Rule::file => {
-            let expr = pair
+            let inner = pair
                 .into_inner()
                 .next()
                 .ok_or_else(|| "empty expression".to_string())?;
-            build(expr)
+            build(inner)
         }
-        Rule::expr => {
+        // `||` / `&&` layers: left-associative folds over same-operator children
+        // (the operator literals are implicit — every child is joined the same way).
+        Rule::or => fold_binary(pair, BinOp::Or),
+        Rule::and => fold_binary(pair, BinOp::And),
+        // comparison layer: `term (cmp_op term)?` — non-associative, ≤ 1 operator.
+        Rule::cmp => {
             let mut inner = pair.into_inner();
-            let first = inner.next().ok_or("empty expr")?;
-            let mut acc = build(first)?;
-            while let Some(op) = inner.next() {
-                let rhs = inner.next().ok_or("dangling operator")?;
-                let r = build(rhs)?;
-                let op = match op.as_str() {
-                    "==" => BinOp::Eq,
-                    "!=" => BinOp::Ne,
-                    "<" => BinOp::Lt,
-                    "<=" => BinOp::Le,
-                    ">" => BinOp::Gt,
-                    ">=" => BinOp::Ge,
-                    "&&" => BinOp::And,
-                    "||" => BinOp::Or,
-                    o => return Err(format!("unsupported operator {o:?}")),
-                };
-                acc = Expr::Bin(op, Box::new(acc), Box::new(r));
+            let lhs = build(inner.next().ok_or("empty cmp")?)?;
+            match inner.next() {
+                Some(op) => {
+                    let rhs = build(inner.next().ok_or("comparison missing right operand")?)?;
+                    Ok(Expr::Bin(cmp_op(op.as_str())?, Box::new(lhs), Box::new(rhs)))
+                }
+                None => Ok(lhs),
             }
-            Ok(acc)
         }
         Rule::term | Rule::literal => {
             let inner = pair
@@ -157,25 +247,35 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
                 .ok_or_else(|| "call without callee".to_string())?
                 .as_str();
             let args: Vec<Expr> = inner.map(build).collect::<Result<_, _>>()?;
-            let (builtin, arity) = match name {
-                "parse_time" => (Builtin::ParseTime, 1),
-                "meaningful" => (Builtin::Meaningful, 1),
-                "bucket" => (Builtin::Bucket, 2),
-                "round" => (Builtin::Round, 1),
-                "trim" => (Builtin::Trim, 1),
-                "lower" => (Builtin::Lower, 1),
-                "coalesce" => (Builtin::Coalesce, 2),
-                other => {
-                    return Err(format!(
-                        "unknown built-in {other:?}; v1: parse_time/meaningful/bucket/round/trim/lower/coalesce"
-                    ))
-                }
-            };
-            if args.len() != arity {
-                return Err(format!("{name} expects {arity} arg(s), got {}", args.len()));
+            let builtin: Builtin = name.parse()?;
+            if args.len() != builtin.arity() {
+                return Err(format!(
+                    "{} expects {} arg(s), got {}",
+                    builtin.name(),
+                    builtin.arity(),
+                    args.len()
+                ));
             }
             Ok(Expr::Call(builtin, args))
         }
         other => Err(format!("unexpected grammar rule: {other:?}")),
     }
 }
+
+/// Left-associative fold of a precedence layer's same-operator children
+/// (`or` → `||`, `and` → `&&`). A lone child passes through un-wrapped so a bare
+/// term never gains a spurious `Bin` node.
+fn fold_binary(pair: Pair<'_, Rule>, op: BinOp) -> Result<Expr, String> {
+    let mut inner = pair.into_inner();
+    let mut acc = build(inner.next().ok_or("empty binary layer")?)?;
+    for child in inner {
+        acc = Expr::Bin(op, Box::new(acc), Box::new(build(child)?));
+    }
+    Ok(acc)
+}
+
+/// Map a `cmp_op` token to its [`BinOp`] (the mapping lives on `BinOp`).
+fn cmp_op(op: &str) -> Result<BinOp, String> {
+    BinOp::from_comparison(op).ok_or_else(|| format!("unsupported comparison operator {op:?}"))
+}
+

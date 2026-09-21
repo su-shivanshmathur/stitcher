@@ -6,8 +6,6 @@ use crate::{config, errors::StitcherResult, processor::Key};
 
 #[cfg(feature = "cql")]
 pub mod cql;
-#[cfg(feature = "dynamodb")]
-pub mod dynamo;
 #[cfg(feature = "rocks")]
 pub mod rocks;
 
@@ -144,26 +142,10 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
     }
 }
 
-/// Build the configured store (PLAN §2: CQL now, `DynamoDB` stubbed).
+/// Build the configured store: local `RocksDB` cache + remote CQL.
 #[cfg(all(feature = "rocks", feature = "cql"))]
 pub async fn build_store(cfg: &config::Settings) -> StitcherResult<Arc<dyn Store>> {
-    // only used by the unbuilt-backend arm below
-    #[cfg(all(feature = "rocks", feature = "cql", not(feature = "dynamodb")))]
-    use crate::errors::StitcherError;
     let local = rocks::RocksStore::open(&cfg.store.rocksdb)?;
-    match cfg.store.backend {
-        config::Backend::Cql => {
-            let remote = cql::CqlStore::connect(&cfg.store.cql, cfg.read_concurrency).await?;
-            Ok(Arc::new(ComposedStore { local, remote }))
-        }
-        #[cfg(feature = "dynamodb")]
-        config::Backend::Dynamodb => {
-            let remote = dynamo::DynamoStore::new(&cfg.store);
-            Ok(Arc::new(ComposedStore { local, remote }))
-        }
-        #[cfg(not(feature = "dynamodb"))]
-        config::Backend::Dynamodb => Err(error_stack::report!(StitcherError::Unsupported(
-            "dynamodb — rebuild with --features dynamodb (stub backend)"
-        ))),
-    }
+    let remote = cql::CqlStore::connect(&cfg.store.cql, cfg.read_concurrency).await?;
+    Ok(Arc::new(ComposedStore { local, remote }))
 }

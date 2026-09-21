@@ -1,5 +1,8 @@
 # Development defaults. Override per-deployment via --config-path or STITCHER__* env.
 
+# Tenant allow-list (top-level; must precede any [section]).
+tenant_ids = ["public"]
+
 [server]
 host = "0.0.0.0"
 port = 9090
@@ -7,7 +10,7 @@ port = 9090
 [log]
 # directive syntax: deps (rdkafka/scylla/actix) at info, the framework's debug
 # logs (consumed keys, filter reasons, cql statements, commits) on; RUST_LOG wins
-level = "info,stitcher=debug"
+level = "info,stitcher=debug,rdkafka=warn,scylla=warn"
 
 [source_kafka]
 brokers = ["localhost:9092"]
@@ -45,28 +48,11 @@ ttl_secs = 0
 [state]
 config_file = "config/intent.yaml"
 
+# Output transformer (state → N topics: project/derive/reduce/explode + retention).
+# Comment out to fall back to the processor's passthrough `encode`.
+[transform]
+config_file = "config/transformer.toml"
+
 [enrichment]
 config_file = ""
 reload_secs = 43200
-
-[filters.intent]
-topic = "stitcher-intent-events"
-retention_days = 182
-retention_key = "created_at"
-
-[filters.attempt]
-topic = "stitcher-attempt-events"
-retention_days = 182
-retention_key = "created_at"
-
-[filters.refund]
-topic = "stitcher-refund-events"
-retention_days = 182
-retention_key = "created_at"
-
-[filters.dispute]
-topic = "stitcher-dispute-events"
-retention_days = 182
-retention_key = "created_at"
-
-tenant_ids = ["public"]

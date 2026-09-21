@@ -1,4 +1,4 @@
-//! Dotted-path access into `serde_json::Value` records (shared by processors + codegen).
+//! Dotted-path access into `serde_json::Value`.
 
 use serde_json::Value;
 

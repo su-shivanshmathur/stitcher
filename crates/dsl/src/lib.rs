@@ -1,8 +1,5 @@
-//! `stitcher-dsl` — the schema + expression language shared by compile-time codegen
-//! (`stitcher_macro::schema!`) and the runtime interpreter (`stitcher::state`, lantern
-//! #37): pest grammar, YAML schema model, and the expression AST. Parse-only: no
-//! evaluation lives here (the evaluator binds `stitcher::builtins`, which sits above
-//! this crate to keep the dependency graph acyclic).
+//! `stitcher-dsl` — the schema + expression language for the runtime interpreter
+//! (`stitcher::state`): pest grammar, YAML schema model, expression AST. Parse-only.
 
 pub mod expr;
 pub mod grammar;
