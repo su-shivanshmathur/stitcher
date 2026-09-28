@@ -5,7 +5,7 @@
 //! over the same [`eval`], which keeps their semantics identical by construction.
 
 use serde_json::Value;
-use stitcher_dsl::expr::{BinOp, Builtin, Expr};
+use stitcher_dsl::expr::{BinOp, Builtin, Expr, TimeFormat};
 
 use crate::{builtins, json_util};
 
@@ -65,7 +65,16 @@ fn apply_bin(op: BinOp, lhs: &Value, rhs: &Value) -> Value {
 
 fn apply_builtin<C: EvalContext>(builtin: Builtin, args: &[Value], cx: &C) -> Value {
     match (builtin, args) {
-        (Builtin::ParseTime, [arg]) => builtins::parse_time(arg).map_or(Value::Null, Value::from),
+        (Builtin::ParseTime, [arg]) => {
+            builtins::parse_time(arg, None).map_or(Value::Null, Value::from)
+        }
+        (Builtin::ParseTime, [arg, fmt_val]) => {
+            // a declared-but-unresolvable format fails closed (Null), never legacy
+            match fmt_val.as_str().and_then(|s| s.parse::<TimeFormat>().ok()) {
+                Some(fmt) => builtins::parse_time(arg, Some(fmt)).map_or(Value::Null, Value::from),
+                None => Value::Null,
+            }
+        }
         (Builtin::Meaningful, [arg]) => {
             if builtins::meaningful(arg).is_some() {
                 arg.clone()

@@ -4,3 +4,5 @@
 pub mod expr;
 pub mod grammar;
 pub mod model;
+
+pub use expr::TimeFormat;
