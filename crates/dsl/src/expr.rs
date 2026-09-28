@@ -5,6 +5,34 @@ use pest::iterators::Pair;
 
 use crate::grammar::{parse_expr, Rule};
 
+/// How a `parse_time` input is interpreted; output is always epoch nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeFormat {
+    Rfc3339,
+    EpochSeconds,
+    EpochMillis,
+    EpochMicros,
+    EpochNanos,
+}
+
+impl std::str::FromStr for TimeFormat {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "rfc3339" => Ok(Self::Rfc3339),
+            "epoch_seconds" => Ok(Self::EpochSeconds),
+            "epoch_millis" => Ok(Self::EpochMillis),
+            "epoch_micros" => Ok(Self::EpochMicros),
+            "epoch_nanos" => Ok(Self::EpochNanos),
+            other => Err(format!(
+                "unknown time format {other:?}; expected one of: \
+                 rfc3339, epoch_seconds, epoch_millis, epoch_micros, epoch_nanos"
+            )),
+        }
+    }
+}
+
 /// Binary operator (v1 set; single precedence level, left-associative).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
@@ -43,10 +71,35 @@ impl BinOp {
     }
 }
 
+/// A builtin's argument-count constraint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arity {
+    Exact(usize),
+    Range { min: usize, max: usize },
+}
+
+impl Arity {
+    #[must_use]
+    pub const fn allows(self, n: usize) -> bool {
+        match self {
+            Self::Exact(k) => n == k,
+            Self::Range { min, max } => n >= min && n <= max,
+        }
+    }
+
+    #[must_use]
+    pub fn describe(self) -> String {
+        match self {
+            Self::Exact(k) => format!("{k}"),
+            Self::Range { min, max } => format!("{min}–{max}"),
+        }
+    }
+}
+
 /// Built-in call (v1 vocabulary: `parse_time/meaningful/bucket/round/trim/lower/coalesce`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
-    /// `parse_time(x)`
+    /// `parse_time(x)` or `parse_time(x, 'format')`
     ParseTime,
     /// `meaningful(x)`
     Meaningful,
@@ -108,19 +161,19 @@ impl Builtin {
         }
     }
 
-    /// Number of arguments the builtin accepts.
+    /// Arity constraint for the builtin.
     #[must_use]
-    pub const fn arity(self) -> usize {
+    pub const fn arity(self) -> Arity {
         match self {
-            Self::ParseTime
-            | Self::Meaningful
+            Self::ParseTime => Arity::Range { min: 1, max: 2 },
+            Self::Meaningful
             | Self::Round
             | Self::Trim
             | Self::Lower
             | Self::Latest
             | Self::First
-            | Self::List => 1,
-            Self::Bucket | Self::Coalesce | Self::Get | Self::Lookup => 2,
+            | Self::List => Arity::Exact(1),
+            Self::Bucket | Self::Coalesce | Self::Get | Self::Lookup => Arity::Exact(2),
         }
     }
 }
@@ -248,13 +301,19 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
                 .as_str();
             let args: Vec<Expr> = inner.map(build).collect::<Result<_, _>>()?;
             let builtin: Builtin = name.parse()?;
-            if args.len() != builtin.arity() {
+            if !builtin.arity().allows(args.len()) {
                 return Err(format!(
                     "{} expects {} arg(s), got {}",
                     builtin.name(),
-                    builtin.arity(),
+                    builtin.arity().describe(),
                     args.len()
                 ));
+            }
+            // reject an unknown parse_time format literal at compile time
+            if builtin == Builtin::ParseTime {
+                if let Some(Expr::Str(fmt)) = args.get(1) {
+                    fmt.parse::<TimeFormat>()?;
+                }
             }
             Ok(Expr::Call(builtin, args))
         }

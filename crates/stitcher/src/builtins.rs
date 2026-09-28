@@ -1,20 +1,25 @@
 //! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
 use serde_json::Value;
+use stitcher_dsl::TimeFormat;
 
 use crate::json_util;
 
-/// `parse_time`: epoch-nanos (number or numeric string) or RFC3339-ish string → i64
-/// nanos; `None` when unparseable (the comparator then defaults to epoch 0 upstream).
+/// Normalize a time value to epoch nanoseconds; `fmt` declares the input unit
+/// (no format ⇒ number as-is, string as numeric or RFC3339).
 #[must_use]
-pub fn parse_time(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(_) => json_util::as_i64(v),
-        Value::String(s) => {
-            let s = s.trim();
-            json_util::as_i64(v).or_else(|| parse_rfc3339_nanos(s))
-        }
-        Value::Bool(_) | Value::Null | Value::Array(_) | Value::Object(_) => None,
+pub fn parse_time(v: &Value, fmt: Option<TimeFormat>) -> Option<i64> {
+    match fmt {
+        None => match v {
+            Value::Number(_) => json_util::as_i64(v),
+            Value::String(s) => json_util::as_i64(v).or_else(|| parse_rfc3339_nanos(s.trim())),
+            _ => None,
+        },
+        Some(TimeFormat::Rfc3339) => parse_rfc3339_nanos(v.as_str()?.trim()),
+        Some(TimeFormat::EpochSeconds) => json_util::as_i64(v)?.checked_mul(1_000_000_000),
+        Some(TimeFormat::EpochMillis) => json_util::as_i64(v)?.checked_mul(1_000_000),
+        Some(TimeFormat::EpochMicros) => json_util::as_i64(v)?.checked_mul(1_000),
+        Some(TimeFormat::EpochNanos) => json_util::as_i64(v),
     }
 }
 

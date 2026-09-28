@@ -240,7 +240,7 @@ fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
 /// matches the generated code's `let` sequence).
 fn build_latest_by(comparator: &Expr, payload: &Expr, record: &Value) -> MergeValue {
     let comparator_value = eval(comparator, record);
-    let comparator = builtins::parse_time(&comparator_value)
+    let comparator = builtins::parse_time(&comparator_value, None)
         .or_else(|| json_util::as_i64(&comparator_value))
         .unwrap_or(0);
     MergeValue::LatestBy {
