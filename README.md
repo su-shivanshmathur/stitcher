@@ -28,7 +28,10 @@ CREATE TABLE IF NOT EXISTS stitcher.state (
   PRIMARY KEY ((id_type), id));
 ```
 
-`GET :9090/health` · `GET :9090/metrics` (Prometheus). PII redaction is on by default.
+**Ops endpoints** (`:9090`): `GET /health` · `GET /metrics` (Prometheus) · `GET /state?id_type=<>&id=<>`
+— look up a session's stored state, reusing the pipeline's store connection (`200` state ·
+`404` absent · `400` bad param). PII redaction is on by default; `/state` returns raw session
+data, so keep the ops port cluster-internal.
 
 ## How it works
 
