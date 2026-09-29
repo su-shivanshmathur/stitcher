@@ -1,17 +1,18 @@
-//! `RocksDB` local cache: one column family per `topic-partition` (dropped on revoke);
-//! reads fan out across all CFs (first hit wins); writes durable-without-WAL — the remote
-//! store is the source of truth. Blocking driver calls run on `spawn_blocking`.
+//! `RocksDB` local cache: a single column family for the processor's `id_type` (fixed at
+//! startup), keyed by the entity key — mirrors the remote `(id_type, id)` primary key, so
+//! an entity has ONE cache home regardless of which topic/partition delivered it. The CF
+//! is created at open (under a `state.` prefix, so it never aliases the default CF or the
+//! old `topic:partition` layout) and inherits `ttl_secs`; its contents are wiped on revoke
+//! (ownership may move to another instance; the remote store is authoritative). Writes are
+//! durable-without-WAL; blocking driver calls run on `spawn_blocking`.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use error_stack::ResultExt;
 use rocksdb::{ColumnFamilyDescriptor, Options, DB};
 use tokio::task::spawn_blocking;
 
-use super::{PartitionRef, RebalanceEvent, Store};
+use super::{RebalanceEvent, Store};
 use crate::{
     codec, config,
     errors::{StitcherError, StitcherResult},
@@ -19,12 +20,14 @@ use crate::{
     processor::Key,
 };
 
-/// `RocksDB` cache store.
+/// Prefix isolating the state CF from the default CF and the legacy `topic:partition` CFs.
+const STATE_CF_PREFIX: &str = "state.";
+
+/// `RocksDB` cache store — one CF (`state.<id_type>`) for the process's state.
 pub struct RocksStore {
     db: Arc<DB>,
-    /// Names of CFs we are responsible for (default excluded); handle lookup stays
-    /// fresh by querying the DB — CF churn is a rebalance-time event, not per message.
-    known_cfs: std::sync::RwLock<HashSet<String>>,
+    /// The single state CF name, `state.<id_type>`.
+    state_cf: String,
 }
 
 impl std::fmt::Debug for RocksStore {
@@ -34,25 +37,33 @@ impl std::fmt::Debug for RocksStore {
 }
 
 impl RocksStore {
-    /// Open (or create) the DB at `cfg.path` with all pre-existing CFs.
-    pub fn open(cfg: &config::RocksCfg) -> StitcherResult<Self> {
+    /// Open (or create) the DB at `cfg.path`; the `id_type` CF is created here with the TTL.
+    pub fn open(cfg: &config::RocksCfg, id_type: &str) -> StitcherResult<Self> {
         let path = cfg.path.clone();
         let ttl_secs = cfg.ttl_secs;
-        let span = tracing::info_span!("rocksdb_open", path = %path);
+        let state_cf = format!("{STATE_CF_PREFIX}{id_type}");
+        let span = tracing::info_span!("rocksdb_open", path = %path, cf = %state_cf);
         let _enter = span.enter();
-        Self::open_inner(&path, ttl_secs)
+        Self::open_inner(&path, ttl_secs, state_cf)
     }
 
-    fn open_inner(path: &str, ttl_secs: u64) -> StitcherResult<Self> {
+    fn open_inner(path: &str, ttl_secs: u64, state_cf: String) -> StitcherResult<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
         // larger write buffers + WAL disabled per-put (cache only)
         opts.set_write_buffer_size(128 * 1024 * 1024);
 
+        // Every CF must be listed at open. Include default, whatever exists on disk, and
+        // the state CF (so it's created here and inherits the TTL below).
+        let default = rocksdb::DEFAULT_COLUMN_FAMILY_NAME.to_string();
         let existing = DB::list_cf(&opts, path).unwrap_or_default();
-        let mut all: Vec<String> = vec![rocksdb::DEFAULT_COLUMN_FAMILY_NAME.to_string()];
-        all.extend(existing);
+        let mut all: Vec<String> = vec![default.clone(), state_cf.clone()];
+        all.extend(
+            existing
+                .into_iter()
+                .filter(|name| name != &default && name != &state_cf),
+        );
         let cfds: Vec<ColumnFamilyDescriptor> = all
             .iter()
             .map(|name| ColumnFamilyDescriptor::new(name.clone(), Options::default()))
@@ -70,37 +81,19 @@ impl RocksStore {
         }
         .change_context(StitcherError::Rocks(format!("open {path}")))?;
 
-        Ok(Self {
-            db: Arc::new(db),
-            known_cfs: std::sync::RwLock::new(HashSet::new()),
-        })
-    }
-
-    fn set_known_cfs(&self, parts: &[PartitionRef], insert: bool) {
-        let mut known = self
-            .known_cfs
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for part in parts {
-            let name = part.cf_name();
-            if insert {
-                known.insert(name);
-            } else {
-                known.remove(&name);
+        // Migration: drop any CF that is neither the default nor our state CF — i.e. the
+        // legacy `topic:partition` cache, or a stale state CF for a different id_type.
+        for name in &all {
+            if name != &default && name != &state_cf {
+                db.drop_cf(name)
+                    .change_context(StitcherError::Rocks(format!("drop legacy cf {name}")))?;
             }
         }
-    }
 
-    fn create_cf_sync(db: &DB, name: &str) -> StitcherResult<()> {
-        db.create_cf(name, &Options::default())
-            .change_context(StitcherError::Rocks(format!("create_cf {name}")))?;
-        Ok(())
-    }
-
-    fn drop_cf_sync(db: &DB, name: &str) -> StitcherResult<()> {
-        db.drop_cf(name)
-            .change_context(StitcherError::Rocks(format!("drop_cf {name}")))?;
-        Ok(())
+        Ok(Self {
+            db: Arc::new(db),
+            state_cf,
+        })
     }
 
     async fn get_many_inner(&self, keys: &[Key]) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
@@ -108,42 +101,33 @@ impl RocksStore {
         super::traced(
             "rocksdb",
             metrics::store_get_seconds,
-            |found, secs| {
+            |found: &HashMap<Key, (i64, Vec<u8>)>, secs| {
                 tracing::debug!(
                     keys = n_keys,
                     found = found.len(),
                     elapsed_ms = secs * 1e3,
-                    "rocksdb: get across column families"
+                    "rocksdb: get"
                 );
             },
             async {
                 let db = Arc::clone(&self.db);
-                let cf_names: HashSet<String> = self
-                    .known_cfs
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
+                let cf_name = self.state_cf.clone();
                 let keys = keys.to_vec();
                 let out =
                     spawn_blocking(move || -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
                         let mut found = HashMap::with_capacity(keys.len());
-                        // resolve CF handles once per batch, not per (key, CF) pair
-                        let cfs: Vec<_> = cf_names
-                            .iter()
-                            .filter_map(|name| db.cf_handle(name))
-                            .collect();
+                        let Some(cf) = db.cf_handle(&cf_name) else {
+                            return Ok(found);
+                        };
                         for key in &keys {
-                            for cf in &cfs {
-                                if let Some(raw) = db
-                                    .get_cf(cf, key.as_bytes())
-                                    .change_context(StitcherError::Rocks("get_cf".to_string()))?
-                                {
-                                    if let Some((version, json)) = codec::unframe(&raw) {
-                                        found.insert(key.clone(), (version, json.to_vec()));
-                                        break; // first CF hit wins
-                                    }
-                                    // unframeable bytes = corrupt cache entry → treat as absent
+                            if let Some(raw) = db
+                                .get_cf(&cf, key.as_bytes())
+                                .change_context(StitcherError::Rocks("get_cf".to_string()))?
+                            {
+                                if let Some((version, json)) = codec::unframe(&raw) {
+                                    found.insert(key.clone(), (version, json.to_vec()));
                                 }
+                                // unframeable bytes = corrupt cache entry → treat as absent
                             }
                         }
                         Ok(found)
@@ -156,13 +140,7 @@ impl RocksStore {
         .await
     }
 
-    async fn put_inner(
-        &self,
-        key: &Key,
-        version: i64,
-        blob: &[u8],
-        part: &PartitionRef,
-    ) -> StitcherResult<()> {
+    async fn put_inner(&self, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
         super::traced(
             "rocksdb",
             metrics::store_put_seconds,
@@ -171,27 +149,20 @@ impl RocksStore {
                     key = %key.as_str(),
                     version,
                     blob_bytes = blob.len(),
-                    cf = %part.cf_name(),
+                    cf = %self.state_cf,
                     elapsed_ms = secs * 1e3,
                     "rocksdb: put_cf (wal disabled)"
                 );
             },
             async {
                 let db = Arc::clone(&self.db);
-                let cf_name = part.cf_name();
+                let cf_name = self.state_cf.clone();
                 let key_bytes = key.as_bytes().to_vec();
                 let value = codec::frame(version, blob);
                 spawn_blocking(move || -> StitcherResult<()> {
-                    let cf = if let Some(cf) = db.cf_handle(&cf_name) {
-                        cf
-                    } else {
-                        Self::create_cf_sync(&db, &cf_name)?;
-                        db.cf_handle(&cf_name).ok_or_else(|| {
-                            error_stack::report!(StitcherError::Rocks(format!(
-                                "cf {cf_name} missing after create"
-                            )))
-                        })?
-                    };
+                    let cf = db.cf_handle(&cf_name).ok_or_else(|| {
+                        error_stack::report!(StitcherError::Rocks(format!("cf {cf_name} missing")))
+                    })?;
                     let mut wopts = rocksdb::WriteOptions::default();
                     wopts.disable_wal(true); // cache only; remote is authoritative
                     db.put_cf_opt(&cf, key_bytes, value, &wopts)
@@ -211,7 +182,7 @@ impl RocksStore {
 impl Store for RocksStore {
     async fn get_many(
         &self,
-        _id_type: &str,
+        _id_type: &str, // fixed at open; `RocksStore` is single-id_type per process
         keys: &[Key],
     ) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
         self.get_many_inner(keys).await
@@ -219,45 +190,31 @@ impl Store for RocksStore {
 
     async fn put(
         &self,
-        _id_type: &str,
+        _id_type: &str, // fixed at open; `RocksStore` is single-id_type per process
         key: &Key,
         version: i64,
         blob: &[u8],
-        part: &PartitionRef,
     ) -> StitcherResult<()> {
-        self.put_inner(key, version, blob, part).await
+        self.put_inner(key, version, blob).await
     }
 
-    /// Synchronous CF maintenance — safe to call from rdkafka's rebalance callbacks.
+    /// Wipes the local cache on revoke. Called after the drain wait in `pre_rebalance`;
+    /// normally no batch is in flight, but on drain timeout one may still be running.
+    /// In the single-instance case a late put writes the same bytes to both local and
+    /// remote, so the cache stays consistent — the stale-read risk is multi-instance
+    /// (already out of scope). The CF structure is preserved; only its contents are
+    /// range-deleted.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
-        match ev {
-            RebalanceEvent::Assign(parts) => {
-                for part in parts {
-                    let name = part.cf_name();
-                    if self.db.cf_handle(&name).is_none() {
-                        Self::create_cf_sync(&self.db, &name)?;
-                    }
-                }
-                self.set_known_cfs(parts, true);
-            }
-            RebalanceEvent::Revoke(parts) => {
-                for part in parts {
-                    let name = part.cf_name();
-                    if self.db.cf_handle(&name).is_some() {
-                        // Revoked CFs are dropped — state re-syncs from the remote store
-                        // on re-assign.
-                        Self::drop_cf_sync(&self.db, &name)?;
-                    }
-                }
-                self.set_known_cfs(parts, false);
+        if let RebalanceEvent::Revoke(_) = ev {
+            if let Some(cf) = self.db.cf_handle(&self.state_cf) {
+                // Range `["", 0xFF)` covers every key: 0xFF is not a valid UTF-8 byte
+                // (max encoding byte is 0xF4 for U+10FFFF), so no entity key sorts ≥ it.
+                let (lo, hi): (&[u8], &[u8]) = (&[], &[0xFF]);
+                self.db
+                    .delete_range_cf(&cf, lo, hi)
+                    .change_context(StitcherError::Rocks("delete_range_cf".to_string()))?;
             }
         }
-        metrics::assigned_partitions(
-            self.known_cfs
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len(),
-        );
         Ok(())
     }
 

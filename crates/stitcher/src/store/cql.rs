@@ -215,14 +215,7 @@ impl Store for CqlStore {
         Ok(pairs.into_iter().collect())
     }
 
-    async fn put(
-        &self,
-        id_type: &str,
-        key: &Key,
-        version: i64,
-        blob: &[u8],
-        _part: &super::PartitionRef,
-    ) -> StitcherResult<()> {
+    async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
         super::traced(
             "cql",
             metrics::store_put_seconds,

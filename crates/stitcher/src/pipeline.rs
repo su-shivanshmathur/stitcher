@@ -19,7 +19,7 @@ use crate::{
     metrics,
     processor::{Key, OutMsg, Processor, Sign},
     projection::{Projection, ProjectionContext},
-    store::{PartitionRef, Store},
+    store::Store,
     util,
 };
 
@@ -37,7 +37,7 @@ pub async fn run<P: Processor>(
     metrics::spawn_server(&settings.server.host, settings.server.port)?;
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
-        match crate::store::build_store(&settings).await {
+        match crate::store::build_store(&settings, proc.id_type()).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -48,7 +48,7 @@ pub async fn run<P: Processor>(
             }
         }
     } else {
-        crate::store::build_store(&settings).await?
+        crate::store::build_store(&settings, proc.id_type()).await?
     };
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
@@ -308,7 +308,6 @@ async fn process_batch<P: Processor>(
 
     // 2. fold into per-key states (remove+insert: no clones in the hot fold)
     let mut states: HashMap<Key, P::State> = HashMap::new();
-    let mut key_partition: HashMap<Key, PartitionRef> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
         // (a) inspect: incoming record, with its key when decodable (INSPECT.md)
@@ -329,12 +328,6 @@ async fn process_batch<P: Processor>(
                     offset = rec.offset,
                     "record decoded"
                 );
-                key_partition
-                    .entry(key.clone())
-                    .or_insert_with(|| PartitionRef {
-                        topic: rec.topic.clone(),
-                        partition: rec.partition,
-                    });
                 match states.remove(&key) {
                     Some(old) => {
                         states.insert(key, old.merge(state));
@@ -357,7 +350,7 @@ async fn process_batch<P: Processor>(
         // 4. merge + encode deltas; 5. retention filter
         let now = util::now_secs();
         let mut msgs: Vec<OutMsg> = Vec::new();
-        let mut merged_states: Vec<(Key, Vec<u8>, PartitionRef)> = Vec::with_capacity(keys.len());
+        let mut states_to_persist: Vec<(Key, Vec<u8>)> = Vec::with_capacity(keys.len());
         let empty = P::State::default(); // inspect rendering of an absent old state (mempty)
         for (key, local) in states {
             let stored_state = match stored.get(&key) {
@@ -412,12 +405,8 @@ async fn process_batch<P: Processor>(
             }
             let blob = serde_json::to_vec(&merged_value)
                 .change_context(StitcherError::Codec("serialize merged state".into()))?;
-            let part = key_partition.get(&key).cloned().unwrap_or(PartitionRef {
-                topic: String::new(),
-                partition: 0,
-            });
             tracing::debug!(key = %key.as_str(), had_stored, blob_bytes = blob.len(), "state persisted");
-            merged_states.push((key, blob, part));
+            states_to_persist.push((key, blob));
         }
         // retention is the projection's concern; produce everything it returned
         ctx.inspector.outgoing(&msgs);
@@ -432,11 +421,11 @@ async fn process_batch<P: Processor>(
             // 7. dual-store persist (concurrent within the batch; concurrent dual-write
             //    inside Store::put)
             futures::stream::iter(
-                merged_states
+                states_to_persist
                     .into_iter()
-                    .map(|(key, blob, part)| async move {
+                    .map(|(key, blob)| async move {
                         store
-                            .put(proc.id_type(), &key, proc.state_version(), &blob, &part)
+                            .put(proc.id_type(), &key, proc.state_version(), &blob)
                             .await
                     }),
             )
@@ -519,7 +508,6 @@ impl Store for NoStore {
         _key: &Key,
         _version: i64,
         _blob: &[u8],
-        _part: &PartitionRef,
     ) -> StitcherResult<()> {
         Ok(())
     }
