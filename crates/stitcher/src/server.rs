@@ -5,30 +5,42 @@
 //! `/state` handler reuses that one connection pool rather than opening a new session
 //! (mirrors an `AppState`-of-shared-handles design). The store's scylla session lives on
 //! the pipeline's runtime, which stays alive for the process lifetime.
+//!
+//! `/state` returns raw session data (PII); keep the ops port cluster-internal.
 
 use std::sync::Arc;
+
+use prometheus::Encoder;
 
 use crate::errors::{StitcherError, StitcherResult};
 use crate::store::Store;
 
-/// Shared handles injected into every request (currently just the state store).
+/// Shared handles injected into every request.
 #[derive(Clone)]
 struct AppState {
     store: Arc<dyn Store>,
+    /// The single id_type this process serves. The store's local cache is keyed to it
+    /// (`RocksStore` is single-id_type per process), so `/state` must reject any other
+    /// id_type — otherwise a cache hit could return the wrong type's state.
+    id_type: Arc<str>,
 }
 
 /// Spawn the actix-web ops server on a dedicated OS thread, reusing `store` for `/state`.
+/// `id_type` is the type this process serves (used to reject cross-type `/state` queries).
 /// The pre-bound `TcpListener` surfaces bind errors before the thread is spawned.
-pub fn spawn(host: &str, port: u16, store: Arc<dyn Store>) -> StitcherResult<()> {
+pub fn spawn(host: &str, port: u16, store: Arc<dyn Store>, id_type: &str) -> StitcherResult<()> {
     let addr = format!("{host}:{port}");
     let listener = std::net::TcpListener::bind(&addr)
         .map_err(|e| error_stack::report!(StitcherError::Telemetry(format!("bind {addr}: {e}"))))?;
     tracing::info!(%addr, "ops endpoint up (/metrics, /health, /state)");
 
+    let state = actix_web::web::Data::new(AppState {
+        store,
+        id_type: Arc::from(id_type),
+    });
     std::thread::Builder::new()
         .name("ops-http".to_string())
         .spawn(move || {
-            let state = actix_web::web::Data::new(AppState { store });
             let rt = actix_web::rt::System::new();
             rt.block_on(async move {
                 let server = match actix_web::HttpServer::new(move || {
@@ -72,7 +84,6 @@ async fn scrape() -> actix_web::HttpResponse {
 }
 
 fn gather_metrics() -> Result<String, String> {
-    use prometheus::Encoder;
     let encoder = prometheus::TextEncoder::new();
     let mut buf = Vec::new();
     encoder
@@ -115,19 +126,36 @@ async fn state_handler(
 ) -> actix_web::HttpResponse {
     // The extractor already 400s on missing params; guard empty strings too.
     if params.id_type.is_empty() || params.id.is_empty() {
-        return actix_web::HttpResponse::BadRequest().json(ErrorBody {
+        actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: "id_type and id must not be empty".to_string(),
-        });
+        })
+    } else if *params.id_type != *state.id_type {
+        // This process serves one id_type; its local cache is keyed to it and ignores
+        // the argument, so another type could yield a wrong-type cache hit — reject it.
+        actix_web::HttpResponse::BadRequest().json(ErrorBody {
+            error: format!(
+                "this instance serves id_type={}; query for id_type={} not allowed",
+                state.id_type, params.id_type
+            ),
+        })
+    } else {
+        fetch_state(&params, &state).await
     }
+}
 
+/// Read one `(id_type, id)` from the shared store and render it. Local cache first,
+/// remote on a miss (`ComposedStore`); validation is the caller's job.
+async fn fetch_state(
+    params: &StateParams,
+    state: &AppState,
+) -> actix_web::HttpResponse {
     // `Key` is `type Key = String`.
     let key: crate::processor::Key = params.id.clone();
-    let result = state
+    match state
         .store
         .get_many(&params.id_type, std::slice::from_ref(&key))
-        .await;
-
-    match result {
+        .await
+    {
         Err(e) => {
             tracing::error!(error = ?e, id_type = %params.id_type, id = %params.id, "state query failed");
             actix_web::HttpResponse::InternalServerError().json(ErrorBody {

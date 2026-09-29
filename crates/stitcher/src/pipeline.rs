@@ -50,7 +50,12 @@ pub async fn run<P: Processor>(
         crate::store::build_store(&settings, proc.id_type()).await?
     };
     // Ops HTTP server reuses the store connection just built (/metrics, /health, /state).
-    crate::server::spawn(&settings.server.host, settings.server.port, Arc::clone(&store))?;
+    crate::server::spawn(
+        &settings.server.host,
+        settings.server.port,
+        Arc::clone(&store),
+        proc.id_type(),
+    )?;
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
     let enrichment = Enrichment::spawn_reloader(&settings.enrichment)?;
