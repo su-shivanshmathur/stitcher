@@ -1,10 +1,9 @@
 //! Metrics: `prometheus` statics scraped via the actix-web `/metrics` endpoint (PLAN #22).
 //! Instruments are `LazyLock<Option<_>>` self-registering statics — a construction
-//! failure logs once and disables that instrument (no panic path).
+//! failure logs once and disables that instrument (no panic path). The scrape endpoint
+//! itself lives in [`crate::server`], which gathers this crate's [`registry`].
 
 use std::sync::LazyLock;
-
-use crate::errors::{StitcherError, StitcherResult};
 
 /// The registry every instrument registers itself into (lazily, on first use).
 static REGISTRY: LazyLock<prometheus::Registry> = LazyLock::new(prometheus::Registry::new);
@@ -248,66 +247,7 @@ pub fn consumer_lag(topic: &str, partition: i32, lag: i64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// HTTP endpoint
-// ---------------------------------------------------------------------------
-
-/// Spawn the `actix-web` server exposing `GET /metrics` + `GET /health` on a dedicated
-/// OS thread (`HttpServer` is `!Send`; the pre-bound listener surfaces bind errors).
-pub fn spawn_server(host: &str, port: u16) -> StitcherResult<()> {
-    let addr = format!("{host}:{port}");
-    let listener = std::net::TcpListener::bind(&addr)
-        .map_err(|e| error_stack::report!(StitcherError::Telemetry(format!("bind {addr}: {e}"))))?;
-    tracing::info!(%addr, "metrics/health endpoint up");
-    std::thread::Builder::new()
-        .name("metrics-http".to_string())
-        .spawn(move || {
-            let rt = actix_web::rt::System::new();
-            rt.block_on(async move {
-                let server = match actix_web::HttpServer::new(|| {
-                    actix_web::App::new()
-                        .route("/metrics", actix_web::web::get().to(scrape))
-                        .route("/health", actix_web::web::get().to(health))
-                })
-                .workers(1)
-                .listen(listener)
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!(error = %e, "metrics server listen failed");
-                        return;
-                    }
-                };
-                if let Err(e) = server.run().await {
-                    tracing::error!(error = %e, "metrics server exited");
-                }
-            });
-        })
-        .map_err(|e| {
-            error_stack::report!(StitcherError::Telemetry(format!("spawn metrics-http: {e}")))
-        })?;
-    Ok(())
-}
-
-async fn health() -> &'static str {
-    "ok"
-}
-
-async fn scrape() -> actix_web::HttpResponse {
-    match gather_metrics() {
-        Ok(body) => actix_web::HttpResponse::Ok()
-            .content_type("text/plain; version=0.0.4")
-            .body(body),
-        Err(e) => actix_web::HttpResponse::InternalServerError().body(e),
-    }
-}
-
-fn gather_metrics() -> Result<String, String> {
-    use prometheus::Encoder;
-    let encoder = prometheus::TextEncoder::new();
-    let mut buf = Vec::new();
-    encoder
-        .encode(&REGISTRY.gather(), &mut buf)
-        .map_err(|e| e.to_string())?;
-    String::from_utf8(buf).map_err(|e| e.to_string())
+/// Borrow the shared prometheus registry (used by the HTTP server to gather metrics).
+pub(crate) fn registry() -> &'static prometheus::Registry {
+    &REGISTRY
 }

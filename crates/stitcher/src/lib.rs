@@ -13,6 +13,7 @@ pub mod kafka;
 pub mod merge;
 pub mod metrics;
 pub mod pipeline;
+pub mod server;
 pub mod processor;
 pub mod projection;
 pub mod secret;

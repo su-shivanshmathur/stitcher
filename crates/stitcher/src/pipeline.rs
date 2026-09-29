@@ -34,7 +34,6 @@ pub async fn run<P: Processor>(
     projection: Box<dyn Projection>,
     settings: Settings,
 ) -> StitcherResult<()> {
-    metrics::spawn_server(&settings.server.host, settings.server.port)?;
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
         match crate::store::build_store(&settings, proc.id_type()).await {
@@ -50,6 +49,8 @@ pub async fn run<P: Processor>(
     } else {
         crate::store::build_store(&settings, proc.id_type()).await?
     };
+    // Ops HTTP server reuses the store connection just built (/metrics, /health, /state).
+    crate::server::spawn(&settings.server.host, settings.server.port, Arc::clone(&store))?;
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
     let enrichment = Enrichment::spawn_reloader(&settings.enrichment)?;
