@@ -198,10 +198,12 @@ impl Store for RocksStore {
         self.put_inner(key, version, blob).await
     }
 
-    /// Only called during the rebalance drain (no batch in flight), so wiping the cache
-    /// can't race a get/put. A revoke may move an entity's ownership to another instance,
-    /// so the local cache is emptied to avoid stale reads after re-assign — the CF (with
-    /// its TTL) is kept; only its contents are range-deleted.
+    /// Wipes the local cache on revoke. Called after the drain wait in `pre_rebalance`;
+    /// normally no batch is in flight, but on drain timeout one may still be running.
+    /// In the single-instance case a late put writes the same bytes to both local and
+    /// remote, so the cache stays consistent — the stale-read risk is multi-instance
+    /// (already out of scope). The CF structure is preserved; only its contents are
+    /// range-deleted.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
         if let RebalanceEvent::Revoke(_) = ev {
             if let Some(cf) = self.db.cf_handle(&self.state_cf) {
