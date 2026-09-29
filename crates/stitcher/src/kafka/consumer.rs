@@ -1,5 +1,5 @@
 //! Kafka consumer with rebalance-aware context: manual commits after persist
-//! (at-least-once); a revoke drains the in-flight batch, then drops revoked RocksDB CFs;
+//! (at-least-once); a revoke drains the in-flight batch, then wipes the RocksDB cache;
 //! rdkafka statistics feed the `consumer_lag` gauges.
 
 use std::{
@@ -119,7 +119,7 @@ impl ConsumerContext for StitcherCtx {
     fn pre_rebalance(&self, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(tpl) = rebalance {
             self.guard.drained_flag.store(true, Ordering::SeqCst);
-            // Wait (bounded) for the in-flight batch to finish, then drop revoked CFs.
+            // Wait (bounded) for the in-flight batch to finish, then wipe revoked CF contents.
             let started = Instant::now();
             while self.guard.in_flight.load(Ordering::SeqCst) > 0
                 && started.elapsed() < self.guard.drain_timeout
@@ -129,14 +129,14 @@ impl ConsumerContext for StitcherCtx {
             if started.elapsed() >= self.guard.drain_timeout {
                 tracing::warn!(
                     secs = self.guard.drain_timeout.as_secs(),
-                    "rebalance drain timed out; dropping revoked CFs anyway"
+                    "rebalance drain timed out; wiping revoked CF contents anyway"
                 );
             }
             let parts = tpl_parts(tpl);
             if let Err(e) =
                 futures::executor::block_on(self.store.on_rebalance(&RebalanceEvent::Revoke(parts)))
             {
-                tracing::error!(error = ?e, "failed to drop revoked column families");
+                tracing::error!(error = ?e, "failed to wipe revoked CF contents");
             }
         }
     }
@@ -148,7 +148,7 @@ impl ConsumerContext for StitcherCtx {
                 if let Err(e) = futures::executor::block_on(
                     self.store.on_rebalance(&RebalanceEvent::Assign(parts)),
                 ) {
-                    tracing::error!(error = ?e, "failed to create assigned column families");
+                    tracing::error!(error = ?e, "store rebalance (assign) hook failed");
                 }
                 self.guard.drained_flag.store(false, Ordering::SeqCst);
             }

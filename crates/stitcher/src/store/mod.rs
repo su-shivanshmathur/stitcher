@@ -129,8 +129,8 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
 
 /// Build the configured store: local `RocksDB` cache + remote CQL.
 #[cfg(all(feature = "rocks", feature = "cql"))]
-pub async fn build_store(cfg: &config::Settings) -> StitcherResult<Arc<dyn Store>> {
-    let local = rocks::RocksStore::open(&cfg.store.rocksdb)?;
+pub async fn build_store(cfg: &config::Settings, id_type: &str) -> StitcherResult<Arc<dyn Store>> {
+    let local = rocks::RocksStore::open(&cfg.store.rocksdb, id_type)?;
     let remote = cql::CqlStore::connect(&cfg.store.cql, cfg.read_concurrency).await?;
     Ok(Arc::new(ComposedStore { local, remote }))
 }

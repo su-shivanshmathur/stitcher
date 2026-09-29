@@ -37,7 +37,7 @@ pub async fn run<P: Processor>(
     metrics::spawn_server(&settings.server.host, settings.server.port)?;
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
-        match crate::store::build_store(&settings).await {
+        match crate::store::build_store(&settings, proc.id_type()).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -48,7 +48,7 @@ pub async fn run<P: Processor>(
             }
         }
     } else {
-        crate::store::build_store(&settings).await?
+        crate::store::build_store(&settings, proc.id_type()).await?
     };
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
