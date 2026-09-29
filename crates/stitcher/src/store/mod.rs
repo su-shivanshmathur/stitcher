@@ -9,21 +9,13 @@ pub mod cql;
 #[cfg(feature = "rocks")]
 pub mod rocks;
 
-/// A Kafka topic-partition, mapped to a `RocksDB` column family.
+/// A Kafka topic-partition, carried by rebalance signals.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PartitionRef {
     /// Source topic.
     pub topic: String,
     /// Partition id.
     pub partition: i32,
-}
-
-impl PartitionRef {
-    /// `RocksDB` column family name.
-    #[must_use]
-    pub fn cf_name(&self) -> String {
-        format!("{}:{}", self.topic, self.partition)
-    }
 }
 
 /// Consumer-group rebalance signal.
@@ -46,15 +38,9 @@ pub trait Store: Send + Sync {
         keys: &[Key],
     ) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>>;
 
-    /// Persist a merged state. `part` selects the `RocksDB` CF; remote backends ignore it.
-    async fn put(
-        &self,
-        id_type: &str,
-        key: &Key,
-        version: i64,
-        blob: &[u8],
-        part: &PartitionRef,
-    ) -> StitcherResult<()>;
+    /// Persist a merged state under `(id_type, key)`.
+    async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8])
+        -> StitcherResult<()>;
 
     /// Rebalance hook (`RocksDB` creates/drops CFs).
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()>;
@@ -121,12 +107,11 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
         key: &Key,
         version: i64,
         blob: &[u8],
-        part: &PartitionRef,
     ) -> StitcherResult<()> {
         // dual write; failure of either fails the batch (PLAN §Failure modes)
         let ((), ()) = tokio::try_join!(
-            self.local.put(id_type, key, version, blob, part),
-            self.remote.put(id_type, key, version, blob, part)
+            self.local.put(id_type, key, version, blob),
+            self.remote.put(id_type, key, version, blob)
         )?;
         Ok(())
     }
