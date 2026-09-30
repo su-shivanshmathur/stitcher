@@ -82,9 +82,10 @@ pub fn spawn(
     Ok(())
 }
 
-/// Constant-length byte compare for the admin key: length-checked, then XOR-accumulated
-/// so it does not short-circuit on the first mismatching byte (avoids leaking how much of
-/// the key matched via timing).
+/// Byte compare for the admin key that does not short-circuit on the first mismatching
+/// byte, so it does not leak via timing how many bytes matched. It compares only up to the
+/// shorter length, so it is content-timing-safe but not length-timing-safe — fine here,
+/// where the key length is effectively public (it lives in config).
 fn secret_eq(a: &[u8], b: &[u8]) -> bool {
     let mut diff = u8::from(a.len() != b.len());
     for (x, y) in a.iter().zip(b.iter()) {
@@ -161,7 +162,7 @@ async fn state_handler(
     payload: Result<actix_web::web::Query<StateParams>, actix_web::Error>,
     state: actix_web::web::Data<AppState>,
 ) -> actix_web::HttpResponse {
-    if !authorized(&req, &state) {
+    let mut response = if !authorized(&req, &state) {
         // Uniform 401 whether the key is unset or wrong, so the response never reveals
         // which — the startup log flags an unset key for the operator instead.
         actix_web::HttpResponse::Unauthorized().json(ErrorBody {
@@ -174,7 +175,15 @@ async fn state_handler(
             }),
             Ok(payload) => query_state(payload.into_inner(), &state).await,
         }
-    }
+    };
+    // `/state` carries PII and authenticates with a custom header, so shared caches do not
+    // apply the safeguards tied to `Authorization`. Force `no-store` on every response so
+    // no intermediary or client cache can retain or replay one past the key check.
+    response.headers_mut().insert(
+        actix_web::http::header::CACHE_CONTROL,
+        actix_web::http::header::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 /// Validate a parsed request and read its state from the shared store.
