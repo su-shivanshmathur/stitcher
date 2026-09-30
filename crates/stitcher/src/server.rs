@@ -142,12 +142,12 @@ struct ErrorBody {
 }
 
 /// True when the request carries an `api-key` header matching the configured admin key.
-/// A missing configured key means "closed" — nothing authorizes.
+/// A missing configured key means "closed" — nothing authorizes. The header is compared
+/// as raw bytes, so a non-ASCII key still matches (`to_str` would reject it).
 fn authorized(req: &actix_web::HttpRequest, state: &AppState) -> bool {
     state.admin_api_key.as_ref().is_some_and(|key| {
         req.headers()
             .get("api-key")
-            .and_then(|v| v.to_str().ok())
             .is_some_and(|got| secret_eq(got.as_bytes(), key.as_bytes()))
     })
 }
