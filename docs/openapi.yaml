@@ -1,0 +1,141 @@
+openapi: "3.0.3"
+info:
+  title: stitcher — ops API
+  description: |-
+    Operational HTTP endpoints exposed by the `stitcher` binary on the metrics port
+    (`server.port`, default `9090`). `/state` returns raw session data (PII); keep the
+    ops port cluster-internal.
+  version: "1.0"
+servers:
+  - url: http://localhost:9090
+    description: Local ops listener (default bind 0.0.0.0:9090)
+paths:
+  /health:
+    get:
+      tags: [ops]
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Process is up
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus scrape
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+        "500":
+          description: Metric encoding failed
+          content:
+            text/plain:
+              schema:
+                type: string
+  /state:
+    get:
+      tags: [state]
+      summary: Fetch one session's stored state
+      description: |-
+        Reads the persisted state for a single `(id_type, id)` through the pipeline's
+        shared store (local cache first, remote store on a miss). The process serves a
+        single `id_type`; a query for any other `id_type` is rejected.
+
+        Requires the admin API key in the `api-key` header (`server.admin_api_key`). When
+        no key is configured the endpoint rejects every request with 401.
+      operationId: getState
+      security:
+        - adminApiKey: []
+      parameters:
+        - name: id_type
+          in: query
+          required: true
+          description: Aggregate id type; must match the type this process serves.
+          schema:
+            type: string
+          example: payment_merchant
+        - name: id
+          in: query
+          required: true
+          description: Session id within the id_type.
+          schema:
+            type: string
+          example: pay_APITEST
+      responses:
+        "200":
+          description: State found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StateFound"
+        "400":
+          description: Missing/empty parameter, or an id_type this process does not serve
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Missing or invalid api-key header
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No state stored for the given (id_type, id)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Store error, or the stored blob is not valid JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    adminApiKey:
+      type: apiKey
+      in: header
+      name: api-key
+      description: Admin API key configured as `server.admin_api_key`.
+  schemas:
+    StateFound:
+      type: object
+      required: [id_type, id, version, state]
+      properties:
+        id_type:
+          type: string
+          example: payment_merchant
+        id:
+          type: string
+          example: pay_APITEST
+        version:
+          type: integer
+          format: int64
+          description: Schema version the blob was written under.
+          example: 3
+        state:
+          type: object
+          description: The merged session state (shape is schema-defined).
+          additionalProperties: true
+          example:
+            payment_id: pay_APITEST
+            status: succeeded
+            amount: 4200
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: no state for id_type=payment_merchant id=pay_APITEST

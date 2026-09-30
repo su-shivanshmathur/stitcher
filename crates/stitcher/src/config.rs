@@ -70,6 +70,10 @@ pub struct Server {
     pub host: String,
     /// Bind port (== `--prometheus-port`).
     pub port: u16,
+    /// Admin API key gating `GET /state` (raw session PII), sent by the client in the
+    /// `api-key` header. Unset ⇒ `/state` rejects every request (401); the endpoint only
+    /// serves data once a key is configured (mirrors hyperswitch's `AdminApiAuth`).
+    pub admin_api_key: Option<Secret<String>>,
 }
 
 /// Logging (`tracing-subscriber`: JSON or human-readable console; `RUST_LOG` wins).
@@ -338,6 +342,7 @@ impl Default for Server {
         Self {
             host: "0.0.0.0".to_string(),
             port: 9090,
+            admin_api_key: None,
         }
     }
 }
@@ -419,37 +424,59 @@ impl Default for Enrichment {
 impl Settings {
     /// Structural validation after layering; messages are specific and actionable.
     pub fn validate(&self) -> StitcherResult<()> {
-        let fail = |msg: &str| Err(error_stack::report!(StitcherError::Config(msg.to_string())));
-
-        if self.source_kafka.brokers.is_empty() {
-            return fail("source_kafka.brokers must be non-empty");
-        }
-        if self.source_kafka.topics.is_empty() {
-            return fail("source_kafka.topics must be non-empty");
-        }
-        if self.source_kafka.consumer_group.is_empty() {
-            return fail("source_kafka.consumer_group must be non-empty");
-        }
-        if self.sink_kafka.brokers.is_empty() {
-            return fail("sink_kafka.brokers must be non-empty");
-        }
-        if self.batch.count == 0 {
-            return fail("batch.count must be > 0");
-        }
-        if self.read_concurrency == 0 {
-            return fail("read_concurrency must be > 0");
-        }
-        if !(0.0..=1.0).contains(&self.debug.sample) {
-            return fail("debug.sample must be within 0.0..=1.0");
-        }
+        // A single-variant enum today; this binding breaks the build if a backend is added,
+        // forcing the checks below to be revisited.
         let Backend::Cql = self.store.backend;
-        if self.store.cql.hosts.is_empty() {
-            return fail("store.cql.hosts must be non-empty");
-        }
-        if self.store.cql.keyspace.is_empty() || self.store.cql.table.is_empty() {
-            return fail("store.cql.keyspace and store.cql.table must be non-empty");
-        }
-        Ok(())
+
+        // (failed?, message) in precedence order; the first failing check wins. An empty
+        // admin_api_key is rejected so an empty `api-key` header can never pass (`None`
+        // stays the only "no key configured" state).
+        let checks = [
+            (
+                self.source_kafka.brokers.is_empty(),
+                "source_kafka.brokers must be non-empty",
+            ),
+            (
+                self.source_kafka.topics.is_empty(),
+                "source_kafka.topics must be non-empty",
+            ),
+            (
+                self.source_kafka.consumer_group.is_empty(),
+                "source_kafka.consumer_group must be non-empty",
+            ),
+            (
+                self.sink_kafka.brokers.is_empty(),
+                "sink_kafka.brokers must be non-empty",
+            ),
+            (self.batch.count == 0, "batch.count must be > 0"),
+            (self.read_concurrency == 0, "read_concurrency must be > 0"),
+            (
+                !(0.0..=1.0).contains(&self.debug.sample),
+                "debug.sample must be within 0.0..=1.0",
+            ),
+            (
+                self.server
+                    .admin_api_key
+                    .as_ref()
+                    .is_some_and(|k| k.expose().is_empty()),
+                "server.admin_api_key must not be empty when set",
+            ),
+            (
+                self.store.cql.hosts.is_empty(),
+                "store.cql.hosts must be non-empty",
+            ),
+            (
+                self.store.cql.keyspace.is_empty() || self.store.cql.table.is_empty(),
+                "store.cql.keyspace and store.cql.table must be non-empty",
+            ),
+        ];
+
+        checks
+            .into_iter()
+            .find_map(|(failed, msg)| failed.then_some(msg))
+            .map_or(Ok(()), |msg| {
+                Err(error_stack::report!(StitcherError::Config(msg.to_string())))
+            })
     }
 }
 

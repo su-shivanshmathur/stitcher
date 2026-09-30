@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod processor;
 pub mod projection;
 pub mod secret;
+pub mod server;
 pub mod state;
 pub mod store;
 pub mod telemetry;
