@@ -60,11 +60,6 @@ pub fn spawn(
                 let built = actix_web::HttpServer::new(move || {
                     actix_web::App::new()
                         .app_data(state.clone())
-                        // Render query-extractor rejections (e.g. a missing param) as JSON
-                        // so every 4xx from `/state` shares one `ErrorBody` shape.
-                        .app_data(
-                            actix_web::web::QueryConfig::default().error_handler(query_error),
-                        )
                         .route("/metrics", actix_web::web::get().to(scrape))
                         .route("/health", actix_web::web::get().to(health))
                         .route("/state", actix_web::web::get().to(state_handler))
@@ -96,17 +91,6 @@ fn secret_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-/// Turn a query-extractor rejection into a JSON `ErrorBody` 400 (the default is plain text).
-fn query_error(
-    err: actix_web::error::QueryPayloadError,
-    _req: &actix_web::HttpRequest,
-) -> actix_web::Error {
-    let response = actix_web::HttpResponse::BadRequest().json(ErrorBody {
-        error: err.to_string(),
-    });
-    actix_web::error::InternalError::from_response(err, response).into()
 }
 
 async fn health() -> &'static str {
@@ -168,11 +152,13 @@ fn authorized(req: &actix_web::HttpRequest, state: &AppState) -> bool {
     })
 }
 
-/// Fetch one `(id_type, id)` state from the shared store. Reads authoritative data
-/// (the local cache falls through to the remote store on a miss).
+/// `GET /state`. Authentication runs before the query is inspected, so an unauthenticated
+/// malformed request still gets 401 — the `Query` extractor is taken as a `Result` so a
+/// parse error is handed to the handler rather than rejected before it runs (a bare
+/// `web::Query<_>` argument would 400 ahead of the auth check).
 async fn state_handler(
     req: actix_web::HttpRequest,
-    params: actix_web::web::Query<StateParams>,
+    payload: Result<actix_web::web::Query<StateParams>, actix_web::Error>,
     state: actix_web::web::Data<AppState>,
 ) -> actix_web::HttpResponse {
     if !authorized(&req, &state) {
@@ -181,14 +167,25 @@ async fn state_handler(
         actix_web::HttpResponse::Unauthorized().json(ErrorBody {
             error: "unauthorized: a valid api-key header is required".to_string(),
         })
-    } else if params.id_type.is_empty() || params.id.is_empty() {
-        // The extractor already 400s on missing params; guard empty strings too.
+    } else {
+        match payload {
+            Err(e) => actix_web::HttpResponse::BadRequest().json(ErrorBody {
+                error: e.to_string(),
+            }),
+            Ok(payload) => query_state(payload.into_inner(), &state).await,
+        }
+    }
+}
+
+/// Validate a parsed request and read its state from the shared store.
+async fn query_state(params: StateParams, state: &AppState) -> actix_web::HttpResponse {
+    if params.id_type.is_empty() || params.id.is_empty() {
         actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: "id_type and id must not be empty".to_string(),
         })
     } else if *params.id_type != *state.id_type {
-        // This process serves one id_type; its local cache is keyed to it and ignores
-        // the argument, so another type could yield a wrong-type cache hit — reject it.
+        // This process serves one id_type; its local cache is keyed to it and ignores the
+        // argument, so another type could yield a wrong-type cache hit — reject it.
         actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: format!(
                 "this instance serves id_type={}; query for id_type={} not allowed",
@@ -196,16 +193,13 @@ async fn state_handler(
             ),
         })
     } else {
-        fetch_state(&params, &state).await
+        fetch_state(&params, state).await
     }
 }
 
 /// Read one `(id_type, id)` from the shared store and render it. Local cache first,
 /// remote on a miss (`ComposedStore`); validation is the caller's job.
-async fn fetch_state(
-    params: &StateParams,
-    state: &AppState,
-) -> actix_web::HttpResponse {
+async fn fetch_state(params: &StateParams, state: &AppState) -> actix_web::HttpResponse {
     // `Key` is `type Key = String`.
     let key: crate::processor::Key = params.id.clone();
     match state
