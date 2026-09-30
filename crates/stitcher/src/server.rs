@@ -82,14 +82,15 @@ pub fn spawn(
     Ok(())
 }
 
-/// Byte compare for the admin key that does not short-circuit on the first mismatching
-/// byte, so it does not leak via timing how many bytes matched. It compares only up to the
-/// shorter length, so it is content-timing-safe but not length-timing-safe — fine here,
-/// where the key length is effectively public (it lives in config).
-fn secret_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = u8::from(a.len() != b.len());
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+/// Compare the request's key against the configured key without leaking, via timing, how
+/// many bytes matched or how long the *request* key was. Differences are XOR-accumulated
+/// (no short-circuit), and the loop always runs the configured key's length — a constant
+/// per process — so the running time does not depend on the request. A length mismatch is
+/// folded in up front, so a shorter or longer request still fails.
+fn secret_eq(provided: &[u8], configured: &[u8]) -> bool {
+    let mut diff = u8::from(provided.len() != configured.len());
+    for (i, c) in configured.iter().enumerate() {
+        diff |= provided.get(i).copied().unwrap_or(0) ^ *c;
     }
     diff == 0
 }
