@@ -34,12 +34,15 @@ CREATE TABLE IF NOT EXISTS stitcher.state (
 |---|---|---|---|---|
 | `GET /health` | Liveness probe | — | `200` `ok` | — |
 | `GET /metrics` | Prometheus scrape | — | `200` text | `500` encode failure |
-| `GET /state` | Fetch one session's stored state | `id_type`, `id` (both required) | `200` `{id_type, id, version, state}` | `400` missing/empty/cross-`id_type` · `404` absent · `500` store error / corrupt blob |
+| `GET /state` | Fetch one session's stored state | `id_type`, `id` (both required) | `200` `{id_type, id, version, state}` | `401` missing/invalid key · `400` missing/empty/cross-`id_type` · `404` absent · `500` store error / corrupt blob |
 
 `/state` reuses the pipeline's store connection and serves only the process's own `id_type`
 (a mismatched `id_type` is rejected, since the local cache is keyed to it). It returns raw
-session data (PII) — PII redaction covers logs, not this endpoint, so keep the ops port
-cluster-internal. Full request/response schema: [`docs/openapi.yaml`](docs/openapi.yaml).
+session data (PII), so it requires an admin API key: set `server.admin_api_key` and send it
+in the `api-key` header — with no key configured the endpoint rejects every request (`401`).
+Note the redaction elsewhere is *inspect-payload* redaction only (the `--inspect` renderer),
+not a guarantee across all logs, so still keep the ops port cluster-internal. Full
+request/response schema: [`docs/openapi.yaml`](docs/openapi.yaml).
 
 ## How it works
 

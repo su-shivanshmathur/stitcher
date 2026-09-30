@@ -23,44 +23,61 @@ struct AppState {
     /// (`RocksStore` is single-id_type per process), so `/state` must reject any other
     /// id_type — otherwise a cache hit could return the wrong type's state.
     id_type: Arc<str>,
+    /// Admin API key required in the `api-key` header to read `/state` (raw PII). `None`
+    /// ⇒ every `/state` request is rejected (401), so the endpoint is closed by default.
+    admin_api_key: Option<Arc<str>>,
 }
 
 /// Spawn the actix-web ops server on a dedicated OS thread, reusing `store` for `/state`.
-/// `id_type` is the type this process serves (used to reject cross-type `/state` queries).
+/// `id_type` is the type this process serves (used to reject cross-type `/state` queries);
+/// `admin_api_key`, when set, is required in the `api-key` header for `/state`.
 /// The pre-bound `TcpListener` surfaces bind errors before the thread is spawned.
-pub fn spawn(host: &str, port: u16, store: Arc<dyn Store>, id_type: &str) -> StitcherResult<()> {
+pub fn spawn(
+    host: &str,
+    port: u16,
+    store: Arc<dyn Store>,
+    id_type: &str,
+    admin_api_key: Option<&str>,
+) -> StitcherResult<()> {
     let addr = format!("{host}:{port}");
     let listener = std::net::TcpListener::bind(&addr)
         .map_err(|e| error_stack::report!(StitcherError::Telemetry(format!("bind {addr}: {e}"))))?;
+    if admin_api_key.is_none() {
+        tracing::warn!("server.admin_api_key unset; GET /state will reject every request (401)");
+    }
     tracing::info!(%addr, "ops endpoint up (/metrics, /health, /state)");
 
     let state = actix_web::web::Data::new(AppState {
         store,
         id_type: Arc::from(id_type),
+        admin_api_key: admin_api_key.map(Arc::from),
     });
     std::thread::Builder::new()
         .name("ops-http".to_string())
         .spawn(move || {
             let rt = actix_web::rt::System::new();
             rt.block_on(async move {
-                let server = match actix_web::HttpServer::new(move || {
+                let built = actix_web::HttpServer::new(move || {
                     actix_web::App::new()
                         .app_data(state.clone())
+                        // Render query-extractor rejections (e.g. a missing param) as JSON
+                        // so every 4xx from `/state` shares one `ErrorBody` shape.
+                        .app_data(
+                            actix_web::web::QueryConfig::default().error_handler(query_error),
+                        )
                         .route("/metrics", actix_web::web::get().to(scrape))
                         .route("/health", actix_web::web::get().to(health))
                         .route("/state", actix_web::web::get().to(state_handler))
                 })
                 .workers(1)
-                .listen(listener)
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!(error = %e, "ops server listen failed");
-                        return;
+                .listen(listener);
+                match built {
+                    Ok(server) => {
+                        if let Err(e) = server.run().await {
+                            tracing::error!(error = %e, "ops server exited");
+                        }
                     }
-                };
-                if let Err(e) = server.run().await {
-                    tracing::error!(error = %e, "ops server exited");
+                    Err(e) => tracing::error!(error = %e, "ops server listen failed"),
                 }
             });
         })
@@ -68,6 +85,28 @@ pub fn spawn(host: &str, port: u16, store: Arc<dyn Store>, id_type: &str) -> Sti
             error_stack::report!(StitcherError::Telemetry(format!("spawn ops-http: {e}")))
         })?;
     Ok(())
+}
+
+/// Constant-length byte compare for the admin key: length-checked, then XOR-accumulated
+/// so it does not short-circuit on the first mismatching byte (avoids leaking how much of
+/// the key matched via timing).
+fn secret_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = u8::from(a.len() != b.len());
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Turn a query-extractor rejection into a JSON `ErrorBody` 400 (the default is plain text).
+fn query_error(
+    err: actix_web::error::QueryPayloadError,
+    _req: &actix_web::HttpRequest,
+) -> actix_web::Error {
+    let response = actix_web::HttpResponse::BadRequest().json(ErrorBody {
+        error: err.to_string(),
+    });
+    actix_web::error::InternalError::from_response(err, response).into()
 }
 
 async fn health() -> &'static str {
@@ -118,14 +157,32 @@ struct ErrorBody {
     error: String,
 }
 
+/// True when the request carries an `api-key` header matching the configured admin key.
+/// A missing configured key means "closed" — nothing authorizes.
+fn authorized(req: &actix_web::HttpRequest, state: &AppState) -> bool {
+    state.admin_api_key.as_ref().is_some_and(|key| {
+        req.headers()
+            .get("api-key")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|got| secret_eq(got.as_bytes(), key.as_bytes()))
+    })
+}
+
 /// Fetch one `(id_type, id)` state from the shared store. Reads authoritative data
 /// (the local cache falls through to the remote store on a miss).
 async fn state_handler(
+    req: actix_web::HttpRequest,
     params: actix_web::web::Query<StateParams>,
     state: actix_web::web::Data<AppState>,
 ) -> actix_web::HttpResponse {
-    // The extractor already 400s on missing params; guard empty strings too.
-    if params.id_type.is_empty() || params.id.is_empty() {
+    if !authorized(&req, &state) {
+        // Uniform 401 whether the key is unset or wrong, so the response never reveals
+        // which — the startup log flags an unset key for the operator instead.
+        actix_web::HttpResponse::Unauthorized().json(ErrorBody {
+            error: "unauthorized: a valid api-key header is required".to_string(),
+        })
+    } else if params.id_type.is_empty() || params.id.is_empty() {
+        // The extractor already 400s on missing params; guard empty strings too.
         actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: "id_type and id must not be empty".to_string(),
         })

@@ -55,6 +55,11 @@ pub async fn run<P: Processor>(
         settings.server.port,
         Arc::clone(&store),
         proc.id_type(),
+        settings
+            .server
+            .admin_api_key
+            .as_ref()
+            .map(|k| k.expose().as_str()),
     )?;
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;

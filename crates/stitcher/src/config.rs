@@ -70,6 +70,10 @@ pub struct Server {
     pub host: String,
     /// Bind port (== `--prometheus-port`).
     pub port: u16,
+    /// Admin API key gating `GET /state` (raw session PII), sent by the client in the
+    /// `api-key` header. Unset ⇒ `/state` rejects every request (401); the endpoint only
+    /// serves data once a key is configured (mirrors hyperswitch's `AdminApiAuth`).
+    pub admin_api_key: Option<Secret<String>>,
 }
 
 /// Logging (`tracing-subscriber`: JSON or human-readable console; `RUST_LOG` wins).
@@ -338,6 +342,7 @@ impl Default for Server {
         Self {
             host: "0.0.0.0".to_string(),
             port: 9090,
+            admin_api_key: None,
         }
     }
 }
