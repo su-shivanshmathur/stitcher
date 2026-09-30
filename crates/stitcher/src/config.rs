@@ -444,6 +444,16 @@ impl Settings {
         if self.read_concurrency == 0 {
             return fail("read_concurrency must be > 0");
         }
+        // An empty key would let an empty `api-key` header pass; reject it so `/state` is
+        // never accidentally open (`None` stays the only "no key configured" state).
+        if self
+            .server
+            .admin_api_key
+            .as_ref()
+            .is_some_and(|k| k.expose().is_empty())
+        {
+            return fail("server.admin_api_key must not be empty when set");
+        }
         if !(0.0..=1.0).contains(&self.debug.sample) {
             return fail("debug.sample must be within 0.0..=1.0");
         }
