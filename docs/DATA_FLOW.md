@@ -41,7 +41,7 @@ flowchart TD
     D["proc.decode_with_key(payload)"]
     D -->|None + valid JSON| FIL["dropped by design (filtered)"]
     D -->|None + bad JSON| DLQ["classify_and_route → producer.send_dlq()"]
-    D -->|Some (key,state)| FOLD["fold by key:<br/>old.merge(state)  (Merge::merge)"]
+    D -->|"Some (key,state)"| FOLD["fold by key:<br/>old.merge(state)  (Merge::merge)"]
   end
 
   subgraph PB3["process_batch — per key"]
