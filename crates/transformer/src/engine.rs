@@ -99,16 +99,23 @@ impl CompiledStream {
             obj.insert("sign_flag".to_string(), Value::from(sign.value()));
         }
         let payload = Value::Object(obj);
-        self.passes_retention(&payload, ctx.now_secs).then(|| {
+        // retracts always emit (to cancel their +1); retention gates only +1 emits
+        let should_emit = matches!(sign, Sign::Minus) || self.passes_retention(&payload, ctx.now_secs);
+        should_emit.then(|| {
             let key = self
                 .key
                 .as_ref()
                 .and_then(|key| builtins::key_string(&eval::eval(key, &cx)))
                 .unwrap_or_default();
+            let offset_text = ctx.causation_offset.to_string();
             OutMsg {
+                event_id: envelope_id(&[&self.topic, &key, &offset_text, sign.label()]),
+                correlation_id: envelope_id(&[&self.topic, &key, &offset_text]),
+                state_version: ctx.state_version,
+                produced_at: ctx.now_secs,
+                causation_offset: ctx.causation_offset,
                 topic: self.topic.clone(),
                 key,
-                // serialize failures are dropped (unreachable for a serde_json::Map)
                 payload: serde_json::to_vec(&payload).unwrap_or_default(),
             }
         })
@@ -134,5 +141,17 @@ fn explode_entries(collection: &Value) -> Vec<Value> {
         Value::Array(items) => items.clone(),
         _ => Vec::new(),
     }
+}
+
+/// Stable FNV-1a-64 over NUL-separated parts, hex-encoded (deterministic across runs).
+fn envelope_id(parts: &[&str]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
 }
 

@@ -317,8 +317,8 @@ async fn process_batch<P: Processor>(
         metrics::end_to_end_lag_seconds(lag_secs);
     }
 
-    // 2. fold into per-key states (remove+insert: no clones in the hot fold)
-    let mut states: HashMap<Key, P::State> = HashMap::new();
+    // 2. fold into per-key states (remove+insert: no clones); each carries its max source offset
+    let mut states: HashMap<Key, (P::State, i64)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
         // (a) inspect: incoming record, with its key when decodable (INSPECT.md)
@@ -340,11 +340,11 @@ async fn process_batch<P: Processor>(
                     "record decoded"
                 );
                 match states.remove(&key) {
-                    Some(old) => {
-                        states.insert(key, old.merge(state));
+                    Some((old, offset)) => {
+                        states.insert(key, (old.merge(state), offset.max(rec.offset)));
                     }
                     None => {
-                        states.insert(key, state);
+                        states.insert(key, (state, rec.offset));
                     }
                 }
             }
@@ -363,7 +363,7 @@ async fn process_batch<P: Processor>(
         let mut msgs: Vec<OutMsg> = Vec::new();
         let mut states_to_persist: Vec<(Key, Vec<u8>)> = Vec::with_capacity(keys.len());
         let empty = P::State::default(); // inspect rendering of an absent old state (mempty)
-        for (key, local) in states {
+        for (key, (local, causation_offset)) in states {
             let stored_state = match stored.get(&key) {
                 Some((version, blob)) if *version == proc.state_version() => {
                     match proc.decode_stored(blob) {
@@ -390,6 +390,8 @@ async fn process_batch<P: Processor>(
             let pctx = ProjectionContext {
                 now_secs: now,
                 enrichment: ctx.enrichment,
+                state_version: proc.state_version(),
+                causation_offset,
             };
             let merged = match stored_state {
                 Some(old) => {

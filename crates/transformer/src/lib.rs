@@ -4,6 +4,7 @@
 mod config;
 mod engine;
 mod expr;
+mod validate;
 
 pub use config::load;
 pub use engine::Transform;

@@ -25,14 +25,34 @@ impl Sign {
             Self::Minus => -1,
         }
     }
+
+    /// `"+1"` / `"-1"` label (e.g. for envelope ids).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Plus => "+1",
+            Self::Minus => "-1",
+        }
+    }
 }
 
-/// One outbound Kafka record produced by a [`crate::projection::Projection`].
+/// One outbound Kafka record + a delivery envelope (emitted as Kafka headers) for downstream
+/// dedup/correlation of the ±1 deltas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
+    /// Dedup id: stable hash of `(topic, key, causation_offset, sign)`.
+    pub event_id: String,
+    /// Shared by the retract and emit of one round: hash of `(topic, key, causation_offset)`.
+    pub correlation_id: String,
+    /// Schema version this delta was projected from.
+    pub state_version: i64,
+    /// Projection wall-clock, epoch seconds.
+    pub produced_at: i64,
+    /// Greatest source offset that fed this key's state — the causation token.
+    pub causation_offset: i64,
 }
 
 /// Builds + merges state per record. Batching, store read-modify-write, commit and

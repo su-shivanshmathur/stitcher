@@ -60,6 +60,19 @@ impl Enrichment {
         Ok(this)
     }
 
+    /// Top-level table names in the configured join-map (empty if none configured); used to
+    /// validate transformer `lookup(table, …)` references at boot.
+    pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Vec<String>> {
+        if cfg.config_file.is_empty() {
+            return Ok(Vec::new());
+        }
+        let map = Self::load_file(&cfg.config_file)?;
+        Ok(map
+            .as_object()
+            .map(|tables| tables.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
     /// Look a key up in the join-map (top-level object members only).
     #[must_use]
     pub fn get(&self, key: &str) -> Option<serde_json::Value> {
