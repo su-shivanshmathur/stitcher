@@ -62,13 +62,15 @@ fn check_transformer(
     let program = stitcher::state::config::load(state)?;
     tracing::info!(schema = %program.aggregate, version = program.version, "loaded state schema");
     let tables = match enrichment {
-        Some(path) => stitcher::enrichment::Enrichment::table_names(&stitcher::config::Enrichment {
-            config_file: path.to_string_lossy().into_owned(),
-            ..Default::default()
-        })?,
-        None => Vec::new(),
+        Some(path) => {
+            stitcher::enrichment::Enrichment::table_names(&stitcher::config::Enrichment {
+                config_file: path.to_string_lossy().into_owned(),
+                ..Default::default()
+            })?
+        }
+        None => None,
     };
-    transformer::load(transformer, &program, &tables)?;
+    transformer::load(transformer, &program, tables.as_deref())?;
     tracing::info!("transformer config is valid");
     Ok(())
 }
@@ -92,11 +94,13 @@ fn build_projection(
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
     let tables = stitcher::enrichment::Enrichment::table_names(&cfg.enrichment)?;
     let configured: Box<dyn stitcher::Projection> = match &cfg.transform.config_file {
-        Some(path) => Box::new(transformer::load(path, program, &tables)?),
+        Some(path) => Box::new(transformer::load(path, program, tables.as_deref())?),
         None => Box::new(stitcher::StateLogger),
     };
     // hand-written projections join the composite here
-    Ok(Box::new(stitcher::CompositeProjection::new(vec![configured])))
+    Ok(Box::new(stitcher::CompositeProjection::new(vec![
+        configured,
+    ])))
 }
 
 #[cfg(not(feature = "transform"))]

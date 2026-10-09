@@ -148,10 +148,18 @@ pub fn compile(schema: &model::Schema) -> Result<Program, String> {
         reject_if_contains: schema.decode_filter.reject_if_contains.clone(),
         log_type_in: schema.decode_filter.log_type_in.clone(),
         log_type_path: split_alts(
-            schema.decode_filter.log_type_path.as_deref().unwrap_or("log_type"),
+            schema
+                .decode_filter
+                .log_type_path
+                .as_deref()
+                .unwrap_or("log_type"),
         ),
         tenant_path: split_alts(
-            schema.decode_filter.tenant_path.as_deref().unwrap_or("log.tenant_id"),
+            schema
+                .decode_filter
+                .tenant_path
+                .as_deref()
+                .unwrap_or("log.tenant_id"),
         ),
     };
     let mut fields = BTreeMap::new();
@@ -271,4 +279,3 @@ fn compile_key(template: &str) -> Vec<KeySeg> {
     }
     segments
 }
-

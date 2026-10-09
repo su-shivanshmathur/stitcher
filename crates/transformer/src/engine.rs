@@ -99,8 +99,10 @@ impl CompiledStream {
             obj.insert("sign_flag".to_string(), Value::from(sign.value()));
         }
         let payload = Value::Object(obj);
-        // retracts always emit (to cancel their +1); retention gates only +1 emits
-        let should_emit = matches!(sign, Sign::Minus) || self.passes_retention(&payload, ctx.now_secs);
+        // retracts always emit to cancel their +1; retention gates only +1. (Limitation: a state
+        // born outside the window emits an unmatched -1 — needs a persisted `emitted` flag; roadmap.)
+        let should_emit =
+            matches!(sign, Sign::Minus) || self.passes_retention(&payload, ctx.now_secs);
         should_emit.then(|| {
             let key = self
                 .key
@@ -154,4 +156,3 @@ fn envelope_id(parts: &[&str]) -> String {
     }
     format!("{hash:016x}")
 }
-

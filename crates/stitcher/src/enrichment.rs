@@ -60,17 +60,22 @@ impl Enrichment {
         Ok(this)
     }
 
-    /// Top-level table names in the configured join-map (empty if none configured); used to
-    /// validate transformer `lookup(table, …)` references at boot.
-    pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Vec<String>> {
+    /// Top-level table names in the configured join-map, for validating transformer
+    /// `lookup(table, …)` references at boot. `None` ⇒ no enrichment file configured (skip the
+    /// check); `Some` (possibly empty) ⇒ the configured table set. A non-object file is an error.
+    pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Option<Vec<String>>> {
         if cfg.config_file.is_empty() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         let map = Self::load_file(&cfg.config_file)?;
-        Ok(map
-            .as_object()
-            .map(|tables| tables.keys().cloned().collect())
-            .unwrap_or_default())
+        map.as_object()
+            .map(|tables| Some(tables.keys().cloned().collect()))
+            .ok_or_else(|| {
+                error_stack::report!(StitcherError::Enrichment(format!(
+                    "enrichment file {} must be a JSON object",
+                    cfg.config_file
+                )))
+            })
     }
 
     /// Look a key up in the join-map (top-level object members only).

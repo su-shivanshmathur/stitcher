@@ -207,7 +207,6 @@ impl MergeValue {
             Self::Leaf(_) | Self::Once(_) => false,
         }
     }
-
 }
 
 impl Merge for MergeValue {
@@ -298,4 +297,3 @@ impl Serialize for MergeValue {
         }
     }
 }
-

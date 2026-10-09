@@ -39,8 +39,7 @@ pub trait Store: Send + Sync {
     ) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>>;
 
     /// Persist a merged state under `(id_type, key)`.
-    async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8])
-        -> StitcherResult<()>;
+    async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()>;
 
     /// Rebalance hook (`RocksDB` creates/drops CFs).
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()>;
@@ -101,13 +100,7 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
         Ok(found)
     }
 
-    async fn put(
-        &self,
-        id_type: &str,
-        key: &Key,
-        version: i64,
-        blob: &[u8],
-    ) -> StitcherResult<()> {
+    async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
         // dual write; failure of either fails the batch (PLAN §Failure modes)
         let ((), ()) = tokio::try_join!(
             self.local.put(id_type, key, version, blob),

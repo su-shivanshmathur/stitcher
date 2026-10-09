@@ -43,15 +43,17 @@ pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: stable hash of `(topic, key, causation_offset, sign)`.
+    /// Dedup id: stable hash of `(topic, key, causation_offset, sign)`. Stable across a same-batch
+    /// replay (neutralizes the crash-before-commit phantom `+1`); see `causation_offset`.
     pub event_id: String,
     /// Shared by the retract and emit of one round: hash of `(topic, key, causation_offset)`.
     pub correlation_id: String,
-    /// Schema version this delta was projected from.
+    /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,
     /// Projection wall-clock, epoch seconds.
     pub produced_at: i64,
-    /// Greatest source offset that fed this key's state — the causation token.
+    /// Greatest source offset feeding this key's state in the batch. Assumes one partition per key
+    /// (offsets are per-partition; cross-partition routing breaks uniqueness).
     pub causation_offset: i64,
 }
 

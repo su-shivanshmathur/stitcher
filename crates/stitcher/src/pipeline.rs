@@ -138,7 +138,6 @@ pub async fn run<P: Processor>(
     Ok(())
 }
 
-
 // ---------------------------------------------------------------------------
 // shared plumbing
 // ---------------------------------------------------------------------------
@@ -318,6 +317,7 @@ async fn process_batch<P: Processor>(
     }
 
     // 2. fold into per-key states (remove+insert: no clones); each carries its max source offset
+    //    (the envelope causation token; assumes one partition per key — see OutMsg).
     let mut states: HashMap<Key, (P::State, i64)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
@@ -397,7 +397,10 @@ async fn process_batch<P: Processor>(
                 Some(old) => {
                     metrics::states_merged();
                     // -1 delta on the previously stored state
-                    msgs.extend(ctx.projection.project(&state_to_value(&old), Sign::Minus, &pctx));
+                    msgs.extend(
+                        ctx.projection
+                            .project(&state_to_value(&old), Sign::Minus, &pctx),
+                    );
                     old.merge(local)
                 }
                 None => local,
@@ -433,15 +436,11 @@ async fn process_batch<P: Processor>(
 
             // 7. dual-store persist (concurrent within the batch; concurrent dual-write
             //    inside Store::put)
-            futures::stream::iter(
-                states_to_persist
-                    .into_iter()
-                    .map(|(key, blob)| async move {
-                        store
-                            .put(proc.id_type(), &key, proc.state_version(), &blob)
-                            .await
-                    }),
-            )
+            futures::stream::iter(states_to_persist.into_iter().map(|(key, blob)| async move {
+                store
+                    .put(proc.id_type(), &key, proc.state_version(), &blob)
+                    .await
+            }))
             .buffer_unordered(ctx.read_concurrency)
             .try_collect::<Vec<()>>()
             .await?;

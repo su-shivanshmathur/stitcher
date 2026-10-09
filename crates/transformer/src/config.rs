@@ -60,8 +60,12 @@ const fn default_true() -> bool {
 }
 
 /// Load + compile a `transformer.toml`, cross-validated against the state schema `program` and the
-/// enrichment `tables` (empty ⇒ `lookup` table names are not checked).
-pub fn load(path: &Path, program: &Program, tables: &[String]) -> StitcherResult<Transform> {
+/// enrichment `tables` (`None` ⇒ no enrichment supplied, `lookup` table names are not checked).
+pub fn load(
+    path: &Path,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> StitcherResult<Transform> {
     let ctx = || format!("load transformer config {}", path.display());
     let doc: TransformDoc = config::Config::builder()
         .add_source(config::File::from(path.to_path_buf()).required(true))
@@ -78,7 +82,11 @@ pub fn load(path: &Path, program: &Program, tables: &[String]) -> StitcherResult
         .map_err(|e| error_stack::report!(StitcherError::Config(format!("{}: {e}", ctx()))))
 }
 
-fn compile(doc: TransformDoc, program: &Program, tables: &[String]) -> Result<Transform, String> {
+fn compile(
+    doc: TransformDoc,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> Result<Transform, String> {
     (doc.version > 0)
         .then_some(())
         .ok_or_else(|| "transformer version must be > 0".to_string())
@@ -114,7 +122,7 @@ impl StreamShapeError {
 fn compile_stream(
     doc: StreamDoc,
     program: &Program,
-    tables: &[String],
+    tables: Option<&[String]>,
 ) -> Result<CompiledStream, String> {
     let name = doc.name.clone();
     let err = move |m: String| format!("[stream {name}] {m}");
@@ -132,7 +140,9 @@ fn compile_stream(
         ),
         (
             StreamShapeError::BadRetention,
-            doc.retention.as_ref().is_some_and(|r| r.days <= 0 || r.key.is_empty()),
+            doc.retention
+                .as_ref()
+                .is_some_and(|r| r.days <= 0 || r.key.is_empty()),
         ),
     ]
     .into_iter()

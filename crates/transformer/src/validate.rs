@@ -65,12 +65,22 @@ impl ContradictReason {
     fn describe(self) -> &'static str {
         match self {
             Self::UnknownField => "references an unknown state field",
-            Self::ScalarSubfield => "reaches past a scalar (counter/comparator) which has no sub-fields",
-            Self::BadEnvelopeKey => "a latest_by/keyed_map entry stores only `comparator` and `payload`",
-            Self::EachOutsideExplode => "`each` is valid only inside an `explode` stream",
+            Self::ScalarSubfield => {
+                "reaches past a scalar (counter/comparator) which has no sub-fields"
+            }
+            Self::BadEnvelopeKey => {
+                "a latest_by/keyed_map entry stores only `comparator` and `payload`"
+            }
+            Self::EachOutsideExplode => {
+                "`each` is valid only in an explode stream's per-row expressions (not the gate)"
+            }
             Self::UnrootedPath => "must be rooted at `state.` or `each.`",
-            Self::RootInTransform => "`$` resolves to null in a transformer; root at `state` instead",
-            Self::ReduceNotMap => "latest()/first()/list() require a `state.<keyed_map>` path argument",
+            Self::RootInTransform => {
+                "`$` resolves to null in a transformer; root at `state` instead"
+            }
+            Self::ReduceNotMap => {
+                "latest()/first()/list() require a `state.<keyed_map>` path argument"
+            }
             Self::DynamicBuiltinArg => {
                 "must be a string literal (a dynamic value can't be validated at boot)"
             }
@@ -108,8 +118,12 @@ enum OpaqueReason {
 impl OpaqueReason {
     fn describe(self) -> &'static str {
         match self {
-            Self::PayloadInterior => "reaches into an opaque stored payload (trusted by convention)",
-            Self::OpaqueFieldInterior => "reaches into an opaque last/once value (trusted by convention)",
+            Self::PayloadInterior => {
+                "reaches into an opaque stored payload (trusted by convention)"
+            }
+            Self::OpaqueFieldInterior => {
+                "reaches into an opaque last/once value (trusted by convention)"
+            }
         }
     }
 }
@@ -185,18 +199,30 @@ impl Finding {
 }
 
 /// Validate one compiled stream against the schema. Collects every problem in a single pass and
-/// returns them joined; opaque frontier crossings are logged, not failed.
+/// returns them joined; opaque frontier crossings are logged, not failed. `tables` is the
+/// enrichment table set: `None` ⇒ no enrichment supplied (skip `lookup` table checks), `Some`
+/// (even empty) ⇒ a configured set every `lookup` table must name.
 pub(super) fn validate(
     stream: &CompiledStream,
     program: &Program,
-    tables: &[String],
+    tables: Option<&[String]>,
 ) -> Result<(), String> {
     let exploding = stream.explode.is_some();
     // The explode target is a dependency precondition: `element`/`each` only make sense over a map.
     let explode_error = explode_target_error(stream.explode.as_ref(), program);
-    let all_findings: Vec<Finding> = stream_exprs(stream)
-        .flat_map(|expr| findings(expr, exploding, program, tables))
-        .collect();
+    // The gate is evaluated before the explode (no `each` element), so it never has `each` scope;
+    // key/common/row are evaluated per exploded row, so `each` is in scope when exploding.
+    let gate_findings = stream
+        .gate
+        .iter()
+        .flat_map(|expr| findings(expr, false, program, tables));
+    let row_findings = stream
+        .key
+        .iter()
+        .chain(stream.common.iter().map(|(_, expr)| expr))
+        .chain(stream.row.iter().map(|(_, expr)| expr))
+        .flat_map(|expr| findings(expr, exploding, program, tables));
+    let all_findings: Vec<Finding> = gate_findings.chain(row_findings).collect();
 
     log_opaque_surface(&all_findings);
 
@@ -215,19 +241,13 @@ pub(super) fn validate(
         .ok_or_else(|| errors.join("; "))
 }
 
-/// Every DSL expression a stream reads: gate, key, and the common + row field sources. The
-/// `explode` target is validated separately ([`explode_target_error`]), so it is not re-walked.
-fn stream_exprs(stream: &CompiledStream) -> impl Iterator<Item = &Expr> {
-    stream
-        .gate
-        .iter()
-        .chain(stream.key.iter())
-        .chain(stream.common.iter().map(|(_, expr)| expr))
-        .chain(stream.row.iter().map(|(_, expr)| expr))
-}
-
 /// Classify every path and builtin use in one expression tree.
-fn findings(expr: &Expr, exploding: bool, program: &Program, tables: &[String]) -> Vec<Finding> {
+fn findings(
+    expr: &Expr,
+    exploding: bool,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> Vec<Finding> {
     match expr {
         Expr::Root => vec![Finding::new(
             FindingContext::Root,
@@ -254,7 +274,7 @@ fn call_findings(
     args: &[Expr],
     exploding: bool,
     program: &Program,
-    tables: &[String],
+    tables: Option<&[String]>,
 ) -> Vec<Finding> {
     match builtin {
         Builtin::Latest | Builtin::First | Builtin::List => {
@@ -269,14 +289,18 @@ fn call_findings(
     }
 }
 
-/// `latest`/`first`/`list` reduce a `state.<keyed_map>`. A bad path reports its own, more specific
-/// verdict; a proven-but-non-map path (e.g. a counter) or a non-path argument is a shape error.
+/// `latest`/`first`/`list` reduce a `state.<keyed_map>`. A hard-error path reports its own, more
+/// specific verdict; otherwise (proven or merely opaque) a non-keyed-map path is a shape error — an
+/// opaque payload interior like `latest(state.f.payload.items)` is still not a map.
 fn reduce_findings(args: &[Expr], exploding: bool, program: &Program) -> Vec<Finding> {
     match args {
         [Expr::Path(path)] => {
             let path_verdict = classify_path(path, exploding, program)
                 .map(|verdict| Finding::new(FindingContext::Path(path.clone()), verdict));
-            let shape_error = (path_verdict.is_none() && !is_keyed_map_path(path, program)).then(|| {
+            let hard_error = path_verdict
+                .as_ref()
+                .is_some_and(|finding| finding.verdict.is_error());
+            let shape_error = (!hard_error && !is_keyed_map_path(path, program)).then(|| {
                 Finding::new(
                     FindingContext::Path(path.clone()),
                     Verdict::Contradicted(ContradictReason::ReduceNotMap),
@@ -291,9 +315,23 @@ fn reduce_findings(args: &[Expr], exploding: bool, program: &Program) -> Vec<Fin
     }
 }
 
-/// `get(value, key)`: recurse the value; the key must be a string literal.
-fn get_findings(args: &[Expr], exploding: bool, program: &Program, tables: &[String]) -> Vec<Finding> {
+/// `get(value, key)`: the key must be a string literal. When `value` is a path, `get(path, 'k')`
+/// is structurally `path.k`, so classify the composed path (counter/envelope/opaque rules all
+/// apply); otherwise recurse the value expression.
+fn get_findings(
+    args: &[Expr],
+    exploding: bool,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> Vec<Finding> {
     match args {
+        [Expr::Path(path), Expr::Str(key)] => {
+            let composed = format!("{path}.{key}");
+            classify_path(&composed, exploding, program)
+                .map(|verdict| Finding::new(FindingContext::Path(composed), verdict))
+                .into_iter()
+                .collect()
+        }
         [value, key] => {
             let key_error = (!matches!(key, Expr::Str(_))).then(|| {
                 Finding::new(
@@ -310,9 +348,15 @@ fn get_findings(args: &[Expr], exploding: bool, program: &Program, tables: &[Str
     }
 }
 
-/// `lookup(table, key)` joins enrichment, not state: the table must be a string literal naming a
-/// known table (when `tables` is non-empty); the key is a dynamic join value, so recurse it.
-fn lookup_findings(args: &[Expr], exploding: bool, program: &Program, tables: &[String]) -> Vec<Finding> {
+/// `lookup(table, key)` joins enrichment, not state: the table must be a string literal; when an
+/// enrichment set is supplied (`Some`, even empty) it must name a member; the key is a dynamic join
+/// value, so recurse it.
+fn lookup_findings(
+    args: &[Expr],
+    exploding: bool,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> Vec<Finding> {
     match args {
         [table, key] => {
             let table_error = (!matches!(table, Expr::Str(_))).then(|| {
@@ -321,8 +365,8 @@ fn lookup_findings(args: &[Expr], exploding: bool, program: &Program, tables: &[
                     Verdict::Contradicted(ContradictReason::DynamicBuiltinArg),
                 )
             });
-            let unknown_table = match table {
-                Expr::Str(name) if !tables.is_empty() && !tables.iter().any(|known| known == name) => {
+            let unknown_table = match (table, tables) {
+                (Expr::Str(name), Some(known)) if !known.iter().any(|table| table == name) => {
                     Some(Finding::new(
                         FindingContext::Table(name.clone()),
                         Verdict::Contradicted(ContradictReason::UnknownEnrichmentTable),
@@ -390,12 +434,14 @@ fn classify_state_field(segments: &[&str], program: &Program) -> Option<Verdict>
             Some(Verdict::Contradicted(ContradictReason::UnknownField)),
             |field| match FieldShape::of(field) {
                 FieldShape::Envelope => classify_envelope_access(rest),
-                FieldShape::Map => (!rest.is_empty())
-                    .then_some(Verdict::Lint(LintReason::LiteralMapKey)),
+                FieldShape::Map => {
+                    (!rest.is_empty()).then_some(Verdict::Lint(LintReason::LiteralMapKey))
+                }
                 FieldShape::Scalar => (!rest.is_empty())
                     .then_some(Verdict::Contradicted(ContradictReason::ScalarSubfield)),
-                FieldShape::Opaque => (!rest.is_empty())
-                    .then_some(Verdict::Opaque(OpaqueReason::OpaqueFieldInterior)),
+                FieldShape::Opaque => {
+                    (!rest.is_empty()).then_some(Verdict::Opaque(OpaqueReason::OpaqueFieldInterior))
+                }
             },
         ),
         None => None,
@@ -429,9 +475,8 @@ fn classify_envelope_access(segments: &[&str]) -> Option<Verdict> {
             Some(EnvelopeKey::Payload) => {
                 (!rest.is_empty()).then_some(Verdict::Opaque(OpaqueReason::PayloadInterior))
             }
-            Some(EnvelopeKey::Comparator) => {
-                (!rest.is_empty()).then_some(Verdict::Contradicted(ContradictReason::ScalarSubfield))
-            }
+            Some(EnvelopeKey::Comparator) => (!rest.is_empty())
+                .then_some(Verdict::Contradicted(ContradictReason::ScalarSubfield)),
             None => Some(Verdict::Contradicted(ContradictReason::BadEnvelopeKey)),
         },
     }
@@ -439,7 +484,8 @@ fn classify_envelope_access(segments: &[&str]) -> Option<Verdict> {
 
 /// The single `state.<field>` a path names, if it is exactly one field segment.
 fn single_state_field(path: &str) -> Option<&str> {
-    path.strip_prefix("state.").filter(|field| !field.contains('.'))
+    path.strip_prefix("state.")
+        .filter(|field| !field.contains('.'))
 }
 
 /// Whether a path is a bare `state.<field>` naming a `keyed_map`.
@@ -463,7 +509,9 @@ impl ExplodeError<'_> {
     fn message(&self) -> String {
         match self {
             Self::NotSingleStatePath => "explode must be a single `state.<field>` path".to_string(),
-            Self::UnknownField(field) => format!("explode references unknown state field {field:?}"),
+            Self::UnknownField(field) => {
+                format!("explode references unknown state field {field:?}")
+            }
             Self::NotKeyedMap(field) => format!("explode field {field:?} must be a keyed_map"),
         }
     }
