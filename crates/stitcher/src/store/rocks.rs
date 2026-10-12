@@ -1,10 +1,10 @@
 //! `RocksDB` local cache: a single column family for the processor's `id_type` (fixed at
 //! startup), keyed by the entity key — mirrors the remote `(id_type, id)` primary key, so
-//! an entity has ONE cache home regardless of which topic/partition delivered it. The CF
-//! is created at open (under a `state.` prefix, so it never aliases the default CF or the
-//! old `topic:partition` layout) and inherits `ttl_secs`; its contents are wiped on revoke
-//! (ownership may move to another instance; the remote store is authoritative). Writes are
-//! durable-without-WAL; blocking driver calls run on `spawn_blocking`.
+//! an entity has ONE cache home regardless of which topic/partition delivered it. The column
+//! family is created at open (under a `state.` prefix, so it never aliases the default column
+//! family or the old `topic:partition` layout) and inherits `ttl_secs`; its contents are wiped
+//! on revoke (ownership may move to another instance; the remote store is authoritative). Writes
+//! are durable-without-WAL; blocking driver calls run on `spawn_blocking`.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -20,14 +20,15 @@ use crate::{
     processor::Key,
 };
 
-/// Prefix isolating the state CF from the default CF and the legacy `topic:partition` CFs.
-const STATE_CF_PREFIX: &str = "state.";
+/// Prefix isolating the state column family from the default one and the legacy `topic:partition`
+/// column families.
+const STATE_COLUMN_FAMILY_PREFIX: &str = "state.";
 
-/// `RocksDB` cache store — one CF (`state.<id_type>`) for the process's state.
+/// `RocksDB` cache store — one column family (`state.<id_type>`) for the process's state.
 pub struct RocksStore {
     db: Arc<DB>,
-    /// The single state CF name, `state.<id_type>`.
-    state_cf: String,
+    /// The single state column-family name, `state.<id_type>`.
+    state_column_family: String,
 }
 
 impl std::fmt::Debug for RocksStore {
@@ -37,34 +38,35 @@ impl std::fmt::Debug for RocksStore {
 }
 
 impl RocksStore {
-    /// Open (or create) the DB at `cfg.path`; the `id_type` CF is created here with the TTL.
+    /// Open (or create) the DB at `cfg.path`; the `id_type` column family is created here with the TTL.
     pub fn open(cfg: &config::RocksCfg, id_type: &str) -> StitcherResult<Self> {
         let path = cfg.path.clone();
         let ttl_secs = cfg.ttl_secs;
-        let state_cf = format!("{STATE_CF_PREFIX}{id_type}");
-        let span = tracing::info_span!("rocksdb_open", path = %path, cf = %state_cf);
+        let state_column_family = format!("{STATE_COLUMN_FAMILY_PREFIX}{id_type}");
+        let span =
+            tracing::info_span!("rocksdb_open", path = %path, column_family = %state_column_family);
         let _enter = span.enter();
-        Self::open_inner(&path, ttl_secs, state_cf)
+        Self::open_inner(&path, ttl_secs, state_column_family)
     }
 
-    fn open_inner(path: &str, ttl_secs: u64, state_cf: String) -> StitcherResult<Self> {
+    fn open_inner(path: &str, ttl_secs: u64, state_column_family: String) -> StitcherResult<Self> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
         // larger write buffers + WAL disabled per-put (cache only)
         opts.set_write_buffer_size(128 * 1024 * 1024);
 
-        // Every CF must be listed at open. Include default, whatever exists on disk, and
-        // the state CF (so it's created here and inherits the TTL below).
+        // Every column family must be listed at open. Include default, whatever exists on disk,
+        // and the state column family (so it's created here and inherits the TTL below).
         let default = rocksdb::DEFAULT_COLUMN_FAMILY_NAME.to_string();
         let existing = DB::list_cf(&opts, path).unwrap_or_default();
-        let mut all: Vec<String> = vec![default.clone(), state_cf.clone()];
+        let mut all: Vec<String> = vec![default.clone(), state_column_family.clone()];
         all.extend(
             existing
                 .into_iter()
-                .filter(|name| name != &default && name != &state_cf),
+                .filter(|name| name != &default && name != &state_column_family),
         );
-        let cfds: Vec<ColumnFamilyDescriptor> = all
+        let descriptors: Vec<ColumnFamilyDescriptor> = all
             .iter()
             .map(|name| ColumnFamilyDescriptor::new(name.clone(), Options::default()))
             .collect();
@@ -73,26 +75,27 @@ impl RocksStore {
             DB::open_cf_descriptors_with_ttl(
                 &opts,
                 path,
-                cfds,
+                descriptors,
                 std::time::Duration::from_secs(ttl_secs),
             )
         } else {
-            DB::open_cf_descriptors(&opts, path, cfds)
+            DB::open_cf_descriptors(&opts, path, descriptors)
         }
         .change_context(StitcherError::Rocks(format!("open {path}")))?;
 
-        // Migration: drop any CF that is neither the default nor our state CF — i.e. the
-        // legacy `topic:partition` cache, or a stale state CF for a different id_type.
+        // Migration: drop any column family that is neither the default nor our state one — i.e.
+        // the legacy `topic:partition` cache, or a stale state column family for a different id_type.
         for name in &all {
-            if name != &default && name != &state_cf {
-                db.drop_cf(name)
-                    .change_context(StitcherError::Rocks(format!("drop legacy cf {name}")))?;
+            if name != &default && name != &state_column_family {
+                db.drop_cf(name).change_context(StitcherError::Rocks(format!(
+                    "drop legacy column family {name}"
+                )))?;
             }
         }
 
         Ok(Self {
             db: Arc::new(db),
-            state_cf,
+            state_column_family,
         })
     }
 
@@ -111,17 +114,17 @@ impl RocksStore {
             },
             async {
                 let db = Arc::clone(&self.db);
-                let cf_name = self.state_cf.clone();
+                let column_family_name = self.state_column_family.clone();
                 let keys = keys.to_vec();
                 let out =
                     spawn_blocking(move || -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
                         let mut found = HashMap::with_capacity(keys.len());
-                        let Some(cf) = db.cf_handle(&cf_name) else {
+                        let Some(column_family) = db.cf_handle(&column_family_name) else {
                             return Ok(found);
                         };
                         for key in &keys {
                             if let Some(raw) = db
-                                .get_cf(&cf, key.as_bytes())
+                                .get_cf(&column_family, key.as_bytes())
                                 .change_context(StitcherError::Rocks("get_cf".to_string()))?
                             {
                                 if let Some((version, json)) = codec::unframe(&raw) {
@@ -149,23 +152,25 @@ impl RocksStore {
                     key = %key.as_str(),
                     version,
                     blob_bytes = blob.len(),
-                    cf = %self.state_cf,
+                    column_family = %self.state_column_family,
                     elapsed_ms = secs * 1e3,
                     "rocksdb: put_cf (wal disabled)"
                 );
             },
             async {
                 let db = Arc::clone(&self.db);
-                let cf_name = self.state_cf.clone();
+                let column_family_name = self.state_column_family.clone();
                 let key_bytes = key.as_bytes().to_vec();
                 let value = codec::frame(version, blob);
                 spawn_blocking(move || -> StitcherResult<()> {
-                    let cf = db.cf_handle(&cf_name).ok_or_else(|| {
-                        error_stack::report!(StitcherError::Rocks(format!("cf {cf_name} missing")))
+                    let column_family = db.cf_handle(&column_family_name).ok_or_else(|| {
+                        error_stack::report!(StitcherError::Rocks(format!(
+                            "column family {column_family_name} missing"
+                        )))
                     })?;
                     let mut wopts = rocksdb::WriteOptions::default();
                     wopts.disable_wal(true); // cache only; remote is authoritative
-                    db.put_cf_opt(&cf, key_bytes, value, &wopts)
+                    db.put_cf_opt(&column_family, key_bytes, value, &wopts)
                         .change_context(StitcherError::Rocks("put_cf".to_string()))?;
                     Ok(())
                 })
@@ -202,16 +207,16 @@ impl Store for RocksStore {
     /// normally no batch is in flight, but on drain timeout one may still be running.
     /// In the single-instance case a late put writes the same bytes to both local and
     /// remote, so the cache stays consistent — the stale-read risk is multi-instance
-    /// (already out of scope). The CF structure is preserved; only its contents are
-    /// range-deleted.
+    /// (already out of scope). The column-family structure is preserved; only its contents
+    /// are range-deleted.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
         if let RebalanceEvent::Revoke(_) = ev {
-            if let Some(cf) = self.db.cf_handle(&self.state_cf) {
+            if let Some(column_family) = self.db.cf_handle(&self.state_column_family) {
                 // Range `["", 0xFF)` covers every key: 0xFF is not a valid UTF-8 byte
                 // (max encoding byte is 0xF4 for U+10FFFF), so no entity key sorts ≥ it.
                 let (lo, hi): (&[u8], &[u8]) = (&[], &[0xFF]);
                 self.db
-                    .delete_range_cf(&cf, lo, hi)
+                    .delete_range_cf(&column_family, lo, hi)
                     .change_context(StitcherError::Rocks("delete_range_cf".to_string()))?;
             }
         }

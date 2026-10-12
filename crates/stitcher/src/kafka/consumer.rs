@@ -119,7 +119,7 @@ impl ConsumerContext for StitcherCtx {
     fn pre_rebalance(&self, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(tpl) = rebalance {
             self.guard.drained_flag.store(true, Ordering::SeqCst);
-            // Wait (bounded) for the in-flight batch to finish, then wipe revoked CF contents.
+            // Wait (bounded) for the in-flight batch to finish, then wipe revoked column-family contents.
             let started = Instant::now();
             while self.guard.in_flight.load(Ordering::SeqCst) > 0
                 && started.elapsed() < self.guard.drain_timeout
@@ -129,14 +129,14 @@ impl ConsumerContext for StitcherCtx {
             if started.elapsed() >= self.guard.drain_timeout {
                 tracing::warn!(
                     secs = self.guard.drain_timeout.as_secs(),
-                    "rebalance drain timed out; wiping revoked CF contents anyway"
+                    "rebalance drain timed out; wiping revoked column-family contents anyway"
                 );
             }
             let parts = tpl_parts(tpl);
             if let Err(e) =
                 futures::executor::block_on(self.store.on_rebalance(&RebalanceEvent::Revoke(parts)))
             {
-                tracing::error!(error = ?e, "failed to wipe revoked CF contents");
+                tracing::error!(error = ?e, "failed to wipe revoked column-family contents");
             }
         }
     }
