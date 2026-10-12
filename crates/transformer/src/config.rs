@@ -90,6 +90,7 @@ fn compile(
     (doc.version > 0)
         .then_some(())
         .ok_or_else(|| "transformer version must be > 0".to_string())
+        .and_then(|()| unique_stream_names(&doc.stream))
         .and_then(|()| {
             doc.stream
                 .into_iter()
@@ -97,6 +98,24 @@ fn compile(
                 .collect::<Result<Vec<_>, _>>()
         })
         .map(Transform::new)
+}
+
+/// Stream names must be non-empty and globally unique: each is folded into the delta envelope ids,
+/// so a duplicate would collide two streams' deltas on the same topic.
+fn unique_stream_names(streams: &[StreamDoc]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    streams
+        .iter()
+        .find_map(|stream| {
+            if stream.name.is_empty() {
+                Some("every [[stream]] needs a non-empty name".to_string())
+            } else if seen.insert(stream.name.as_str()) {
+                None
+            } else {
+                Some(format!("duplicate stream name {:?} (names must be unique)", stream.name))
+            }
+        })
+        .map_or(Ok(()), Err)
 }
 
 /// A structural defect in a stream's shape (`fields` vs `explode`/`element`, retention bounds).
@@ -154,6 +173,7 @@ fn compile_stream(
             // non-explode: `fields` are the row; explode: `element` are the per-entry row
             let row_src = if exploding { &doc.element } else { &doc.fields };
             let compiled = CompiledStream {
+                name: doc.name,
                 topic: doc.topic,
                 sign_flag: doc.sign_flag,
                 gate: compile_opt(&doc.gate).map_err(&err)?,

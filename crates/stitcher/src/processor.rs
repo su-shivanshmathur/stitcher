@@ -43,11 +43,11 @@ pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: stable hash of `(topic, key, causation_offset, row_id, sign)` — `row_id` (keyed_map
-    /// entry key / array index) keeps explode rows distinct. Stable across a same-batch replay
-    /// (neutralizes the crash-before-commit phantom `+1`); see `causation_offset`.
+    /// Dedup id: stable hash of `(stream, topic, key, causation_offset, row_id, sign)` — `stream`
+    /// and `row_id` (keyed_map entry key / array index) keep same-topic streams and explode rows
+    /// distinct. Stable across a same-batch replay (neutralizes the phantom `+1`); see `causation_offset`.
     pub event_id: String,
-    /// Shared by the retract and emit of one row: hash of `(topic, key, causation_offset, row_id)`.
+    /// Shared by the retract and emit of one row: hash of `(stream, topic, key, causation_offset, row_id)`.
     pub correlation_id: String,
     /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,

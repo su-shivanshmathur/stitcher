@@ -25,6 +25,8 @@ pub(super) struct Retention {
 
 /// One compiled output stream.
 pub(super) struct CompiledStream {
+    /// Stream name (globally unique; folded into envelope ids so same-topic streams don't collide).
+    pub name: String,
     pub topic: String,
     pub sign_flag: bool,
     pub gate: Option<Expr>,
@@ -112,18 +114,38 @@ impl CompiledStream {
                 .as_ref()
                 .and_then(|key| builtins::key_string(&eval::eval(key, &cx)))
                 .unwrap_or_default();
-            let offset_text = ctx.causation_offset.to_string();
-            OutMsg {
-                event_id: envelope_id(&[&self.topic, &key, &offset_text, row_id, sign.label()]),
-                correlation_id: envelope_id(&[&self.topic, &key, &offset_text, row_id]),
-                state_version: ctx.state_version,
-                produced_at: ctx.now_secs,
-                causation_offset: ctx.causation_offset,
-                topic: self.topic.clone(),
-                key,
-                payload: serde_json::to_vec(&payload).unwrap_or_default(),
-            }
+            self.out_msg(ctx, sign, row_id, key, &payload)
         })
+    }
+
+    /// Build one output record, stamping the delivery envelope. The dedup/correlation ids fold in
+    /// the stream + row identity so same-topic streams and explode rows stay distinct.
+    fn out_msg(
+        &self,
+        ctx: &ProjectionContext<'_>,
+        sign: Sign,
+        row_id: &str,
+        key: String,
+        payload: &Value,
+    ) -> OutMsg {
+        let offset_text = ctx.causation_offset.to_string();
+        OutMsg {
+            event_id: envelope_id(&[
+                &self.name,
+                &self.topic,
+                &key,
+                &offset_text,
+                row_id,
+                sign.label(),
+            ]),
+            correlation_id: envelope_id(&[&self.name, &self.topic, &key, &offset_text, row_id]),
+            state_version: ctx.state_version,
+            produced_at: ctx.now_secs,
+            causation_offset: ctx.causation_offset,
+            topic: self.topic.clone(),
+            key,
+            payload: serde_json::to_vec(payload).unwrap_or_default(),
+        }
     }
 
     /// Keep a row unless its retention timestamp is older than the window. A missing
