@@ -63,17 +63,19 @@ impl CompiledStream {
             .gate
             .as_ref()
             .is_none_or(|gate| builtins::truthy(&eval::eval(gate, &base)));
-        if !open {
-            return Vec::new();
+        // each row carries a stable identity (keyed_map entry key / array index) so its envelope
+        // ids are unique per row; a non-explode stream is one row with no identity.
+        if open {
+            let rows: Vec<(String, Value)> = match &self.explode {
+                Some(explode_expr) => explode_entries(&eval::eval(explode_expr, &base)),
+                None => vec![(String::new(), Value::Null)],
+            };
+            rows.iter()
+                .filter_map(|(row_id, element)| self.render_row(state, sign, ctx, row_id, element))
+                .collect()
+        } else {
+            Vec::new()
         }
-        let elements: Vec<Value> = match &self.explode {
-            Some(explode_expr) => explode_entries(&eval::eval(explode_expr, &base)),
-            None => vec![Value::Null], // a single row, no `each` scope
-        };
-        elements
-            .iter()
-            .filter_map(|element| self.render_row(state, sign, ctx, element))
-            .collect()
     }
 
     fn render_row(
@@ -81,6 +83,7 @@ impl CompiledStream {
         state: &Value,
         sign: Sign,
         ctx: &ProjectionContext<'_>,
+        row_id: &str,
         element: &Value,
     ) -> Option<OutMsg> {
         let cx = StateScope {
@@ -111,8 +114,8 @@ impl CompiledStream {
                 .unwrap_or_default();
             let offset_text = ctx.causation_offset.to_string();
             OutMsg {
-                event_id: envelope_id(&[&self.topic, &key, &offset_text, sign.label()]),
-                correlation_id: envelope_id(&[&self.topic, &key, &offset_text]),
+                event_id: envelope_id(&[&self.topic, &key, &offset_text, row_id, sign.label()]),
+                correlation_id: envelope_id(&[&self.topic, &key, &offset_text, row_id]),
                 state_version: ctx.state_version,
                 produced_at: ctx.now_secs,
                 causation_offset: ctx.causation_offset,
@@ -135,12 +138,20 @@ impl CompiledStream {
     }
 }
 
-/// `explode` a keyed map into its entries (`{comparator, payload}` each, so `each.payload.*`
-/// resolves) or an array into its items. Anything else ⇒ no rows.
-fn explode_entries(collection: &Value) -> Vec<Value> {
+/// `explode` a keyed map into `(entry key, {comparator, payload})` pairs (so `each.payload.*`
+/// resolves and the entry key is a stable row identity) or an array into `(index, item)` pairs.
+/// Anything else ⇒ no rows.
+fn explode_entries(collection: &Value) -> Vec<(String, Value)> {
     match collection {
-        Value::Object(entries) => entries.values().cloned().collect(),
-        Value::Array(items) => items.clone(),
+        Value::Object(entries) => entries
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (index.to_string(), value.clone()))
+            .collect(),
         _ => Vec::new(),
     }
 }

@@ -332,6 +332,19 @@ fn get_findings(
                 .into_iter()
                 .collect()
         }
+        // get() on a latest/first result reaches into the reduced entry's opaque payload; validate
+        // the reduced map arg and record the crossing so the surface log is complete. (`list`
+        // returns an array — a string get always nulls, so it is not a payload crossing.)
+        [value @ Expr::Call(Builtin::Latest | Builtin::First, _), Expr::Str(key)] => {
+            let opaque = Finding::new(
+                FindingContext::Path(key.clone()),
+                Verdict::Opaque(OpaqueReason::PayloadInterior),
+            );
+            findings(value, exploding, program, tables)
+                .into_iter()
+                .chain(std::iter::once(opaque))
+                .collect()
+        }
         [value, key] => {
             let key_error = (!matches!(key, Expr::Str(_))).then(|| {
                 Finding::new(
