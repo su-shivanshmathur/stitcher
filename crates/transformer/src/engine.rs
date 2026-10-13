@@ -178,6 +178,8 @@ impl CompiledStream {
                 .into_iter()
                 .collect();
         };
+        // Retract content is recomputed from stored state with the LIVE enrichment map — a
+        // reload between emit and retract can shift the −1's fields (known limit, FINDINGS #13).
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
         // A key-only change is NOT a no-op: the row under the old key needs its −1 and the

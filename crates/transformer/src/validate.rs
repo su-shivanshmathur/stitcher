@@ -97,6 +97,9 @@ impl ContradictReason {
 enum LintReason {
     /// A literal key into a `keyed_map` (a dynamic map); use `latest`/`first`/`list` or `explode`.
     LiteralMapKey,
+    /// `lookup` (enrichment) in a gate: the verdict is recomputed for the OLD state on later
+    /// transitions, so a hot-reload flip would strand the emitted row (never retracted).
+    EnrichmentDependentGate,
 }
 
 impl LintReason {
@@ -104,6 +107,9 @@ impl LintReason {
         match self {
             Self::LiteralMapKey => {
                 "indexes a keyed_map by a literal key; use latest()/first()/list() or `explode`"
+            }
+            Self::EnrichmentDependentGate => {
+                "reads enrichment (lookup); a gate verdict must be time-stable — it is recomputed for the OLD state on later transitions, so a hot-reloaded map could flip it retroactively and strand the emitted row"
             }
         }
     }
@@ -171,6 +177,8 @@ enum FindingContext {
     GetKey,
     /// The table argument of `lookup`.
     LookupTableArg,
+    /// The stream gate expression.
+    Gate,
 }
 
 impl FindingContext {
@@ -181,6 +189,7 @@ impl FindingContext {
             Self::ReduceArgument => "`latest/first/list`".to_string(),
             Self::GetKey => "`get` key".to_string(),
             Self::LookupTableArg => "`lookup` table".to_string(),
+            Self::Gate => "`gate`".to_string(),
         }
     }
 }
@@ -215,10 +224,18 @@ pub(super) fn validate(
     let explode_error = explode_target_error(stream.explode.as_ref(), program);
     // The gate is evaluated before the explode (no `each` element), so it never has `each` scope;
     // key/common/row are evaluated per exploded row, so `each` is in scope when exploding.
-    let gate_findings = stream
-        .gate
-        .iter()
-        .flat_map(|expr| findings(expr, false, program, tables));
+    // A gate must not read enrichment: its verdict is recomputed for the OLD state on later
+    // transitions, and a hot-reloaded `lookup` flip would strand the emitted row (FINDINGS #13).
+    let gate_findings = stream.gate.iter().flat_map(|expr| {
+        findings(expr, false, program, tables)
+            .into_iter()
+            .chain(contains_lookup(expr).then(|| {
+                Finding::new(
+                    FindingContext::Gate,
+                    Verdict::Lint(LintReason::EnrichmentDependentGate),
+                )
+            }))
+    });
     let row_findings = stream
         .key
         .iter()
@@ -242,6 +259,18 @@ pub(super) fn validate(
         .is_empty()
         .then_some(())
         .ok_or_else(|| errors.join("; "))
+}
+
+/// Does the tree call `lookup` (an enrichment read) anywhere, directly or nested?
+fn contains_lookup(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(builtin, args) => {
+            matches!(builtin, Builtin::Lookup) || args.iter().any(contains_lookup)
+        }
+        Expr::Not(inner) => contains_lookup(inner),
+        Expr::Bin(_, lhs, rhs) => contains_lookup(lhs) || contains_lookup(rhs),
+        _ => false,
+    }
 }
 
 /// Classify every path and builtin use in one expression tree.
