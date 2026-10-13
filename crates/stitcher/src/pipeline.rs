@@ -17,7 +17,7 @@ use crate::{
     kafka::{consumer::OwnedRecord, producer::KafkaProducer},
     merge::Merge,
     metrics,
-    processor::{Causation, Key, OutMsg, Processor, Sign},
+    processor::{Causation, Key, OutMsg, Processor},
     projection::{Projection, ProjectionContext},
     store::Store,
     util,
@@ -415,20 +415,20 @@ async fn process_batch<P: Processor>(
                     Some(old) => ctx.inspector.render_state(old),
                     None => ctx.inspector.render_state(&empty),
                 });
+            // pctx borrows `key` (aggregate_key); `key` is moved into states_to_persist only after
+            // the last pctx use (the project_transition call below) — don't reorder that push up.
             let pctx = ProjectionContext {
                 now_secs: now,
                 enrichment: ctx.enrichment,
                 state_version: proc.state_version(),
                 causation: &causation,
+                aggregate_key: key.as_str(),
             };
+            // capture the old state as a Value before `merge` consumes it (the retract leg)
+            let old_value = stored_state.as_ref().map(state_to_value);
             let merged = match stored_state {
                 Some(old) => {
                     metrics::states_merged();
-                    // -1 delta on the previously stored state
-                    msgs.extend(
-                        ctx.projection
-                            .project(&state_to_value(&old), Sign::Minus, &pctx),
-                    );
                     old.merge(local)
                 }
                 None => local,
@@ -441,9 +441,14 @@ async fn process_batch<P: Processor>(
                     &ctx.inspector.render_state(&merged),
                 );
             }
-            // +1 delta: serialize merged → Value once, reuse it for the persist blob
+            // one transition: retract old (if any) + emit new, paired per row — serialize merged →
+            // Value once, reused for the persist blob
             let merged_value = state_to_value(&merged);
-            msgs.extend(ctx.projection.project(&merged_value, Sign::Plus, &pctx));
+            msgs.extend(ctx.projection.project_transition(
+                old_value.as_ref(),
+                &merged_value,
+                &pctx,
+            ));
             if ctx.dry_run {
                 continue; // inspect tap: no persist
             }

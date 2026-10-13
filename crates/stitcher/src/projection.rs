@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     enrichment::Enrichment,
-    processor::{Causation, OutMsg, Sign},
+    processor::{Causation, OutMsg},
 };
 
 /// Wall clock, enrichment, and envelope inputs handed to a [`Projection`] per call.
@@ -16,19 +16,34 @@ pub struct ProjectionContext<'a> {
     pub state_version: i64,
     /// The source coordinate that caused this key's state change (see [`Causation`]).
     pub causation: &'a Causation,
+    /// The aggregate's stable grouping key — the envelope identity anchor (immutable, unlike the
+    /// per-row projected Kafka key).
+    pub aggregate_key: &'a str,
 }
 
-/// Consumes one signed state change → sink records. `Send + Sync`: held across `.await`.
+/// Consumes one state transition → sink records. `Send + Sync`: held across `.await`. `old` is the
+/// previously stored state (absent on first sight), `new` the merged state; the impl decides the ±1
+/// pair per row so a retract and its emit ship together.
 pub trait Projection: Send + Sync {
-    fn project(&self, state: &Value, sign: Sign, ctx: &ProjectionContext<'_>) -> Vec<OutMsg>;
+    fn project_transition(
+        &self,
+        old: Option<&Value>,
+        new: &Value,
+        ctx: &ProjectionContext<'_>,
+    ) -> Vec<OutMsg>;
 }
 
 /// Default standalone projection: logs the transition (target `stitcher::state`), emits nothing.
 pub struct StateLogger;
 
 impl Projection for StateLogger {
-    fn project(&self, state: &Value, sign: Sign, _ctx: &ProjectionContext<'_>) -> Vec<OutMsg> {
-        tracing::info!(target: "stitcher::state", ?sign, %state, "state");
+    fn project_transition(
+        &self,
+        old: Option<&Value>,
+        new: &Value,
+        _ctx: &ProjectionContext<'_>,
+    ) -> Vec<OutMsg> {
+        tracing::info!(target: "stitcher::state", ?old, %new, "state transition");
         Vec::new()
     }
 }
@@ -47,12 +62,17 @@ impl CompositeProjection {
 }
 
 impl Projection for CompositeProjection {
-    fn project(&self, state: &Value, sign: Sign, ctx: &ProjectionContext<'_>) -> Vec<OutMsg> {
+    fn project_transition(
+        &self,
+        old: Option<&Value>,
+        new: &Value,
+        ctx: &ProjectionContext<'_>,
+    ) -> Vec<OutMsg> {
         match self.members.as_slice() {
-            [only] => only.project(state, sign, ctx),
+            [only] => only.project_transition(old, new, ctx),
             members => members
                 .iter()
-                .flat_map(|member| member.project(state, sign, ctx))
+                .flat_map(|member| member.project_transition(old, new, ctx))
                 .collect(),
         }
     }

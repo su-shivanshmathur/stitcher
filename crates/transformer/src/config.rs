@@ -117,7 +117,10 @@ fn unique_stream_names(streams: &[StreamDoc]) -> Result<(), String> {
             } else if seen.insert(stream.name.as_str()) {
                 None
             } else {
-                Some(format!("duplicate stream name {:?} (names must be unique)", stream.name))
+                Some(format!(
+                    "duplicate stream name {:?} (names must be unique)",
+                    stream.name
+                ))
             }
         })
         .map_or(Ok(()), Err)

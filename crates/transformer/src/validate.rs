@@ -59,6 +59,8 @@ enum ContradictReason {
     DynamicBuiltinArg,
     /// A `lookup` table name absent from the enrichment join-map.
     UnknownEnrichmentTable,
+    /// `get`-by-key on a `list()` result (an array) — string-key navigation always resolves to null.
+    GetOnList,
 }
 
 impl ContradictReason {
@@ -85,6 +87,7 @@ impl ContradictReason {
                 "must be a string literal (a dynamic value can't be validated at boot)"
             }
             Self::UnknownEnrichmentTable => "is not a table in the enrichment join-map",
+            Self::GetOnList => "is read by key from a list() array, which always resolves to null",
         }
     }
 }
@@ -333,8 +336,7 @@ fn get_findings(
                 .collect()
         }
         // get() on a latest/first result reaches into the reduced entry's opaque payload; validate
-        // the reduced map arg and record the crossing so the surface log is complete. (`list`
-        // returns an array — a string get always nulls, so it is not a payload crossing.)
+        // the reduced map arg and record the crossing so the surface log is complete.
         [value @ Expr::Call(Builtin::Latest | Builtin::First, _), Expr::Str(key)] => {
             let opaque = Finding::new(
                 FindingContext::Path(key.clone()),
@@ -343,6 +345,17 @@ fn get_findings(
             findings(value, exploding, program, tables)
                 .into_iter()
                 .chain(std::iter::once(opaque))
+                .collect()
+        }
+        // get() by key on a list() result (an array) always resolves to null — reject it.
+        [value @ Expr::Call(Builtin::List, _), Expr::Str(key)] => {
+            let reject = Finding::new(
+                FindingContext::Path(key.clone()),
+                Verdict::Contradicted(ContradictReason::GetOnList),
+            );
+            findings(value, exploding, program, tables)
+                .into_iter()
+                .chain(std::iter::once(reject))
                 .collect()
         }
         [value, key] => {

@@ -7,7 +7,9 @@ use stitcher_dsl::expr::Expr;
 
 use super::expr::StateScope;
 use stitcher::{
-    builtins, eval, filters, json_util,
+    builtins,
+    enrichment::Enrichment,
+    eval, filters, json_util,
     processor::{OutMsg, Sign},
     projection::{Projection, ProjectionContext},
 };
@@ -44,58 +46,127 @@ impl Transform {
 }
 
 impl Projection for Transform {
-    /// Project a merged state into sink records across every stream, stamping `sign`.
-    fn project(&self, state: &Value, sign: Sign, ctx: &ProjectionContext<'_>) -> Vec<OutMsg> {
+    /// Project a state transition into sink records across every stream (retract `old`, emit `new`).
+    fn project_transition(
+        &self,
+        old: Option<&Value>,
+        new: &Value,
+        ctx: &ProjectionContext<'_>,
+    ) -> Vec<OutMsg> {
         self.streams
             .iter()
-            .flat_map(|stream| stream.render(state, sign, ctx))
+            .flat_map(|stream| stream.render_transition(old, new, ctx))
             .collect()
     }
 }
 
 impl CompiledStream {
-    fn render(&self, state: &Value, sign: Sign, ctx: &ProjectionContext<'_>) -> Vec<OutMsg> {
-        let base = StateScope {
-            state,
+    /// Gate on the NEW state, then per new row make ONE retention decision and ship the pair (`-1`
+    /// from the matching old row, if any, + `+1` from the new row) or nothing — never a lone `-1`.
+    /// (A gate-open→gate-closed transition strands the prior `+1`, like retention; downstream must
+    /// be sign-aware / treat gate changes as grow-only.)
+    fn render_transition(
+        &self,
+        old: Option<&Value>,
+        new: &Value,
+        ctx: &ProjectionContext<'_>,
+    ) -> Vec<OutMsg> {
+        let gate_scope = StateScope {
+            state: new,
             element: None,
             enrichment: ctx.enrichment,
         };
-        // top-level gate (== isStateProper): a closed gate emits nothing
         let open = self
             .gate
             .as_ref()
-            .is_none_or(|gate| builtins::truthy(&eval::eval(gate, &base)));
-        // each row carries a stable identity (keyed_map entry key / array index) so its envelope
-        // ids are unique per row; a non-explode stream is one row with no identity.
+            .is_none_or(|gate| builtins::truthy(&eval::eval(gate, &gate_scope)));
         if open {
-            let rows: Vec<(String, Value)> = match &self.explode {
-                Some(explode_expr) => explode_entries(&eval::eval(explode_expr, &base)),
-                None => vec![(String::new(), Value::Null)],
-            };
-            rows.iter()
-                .filter_map(|(row_id, element)| self.render_row(state, sign, ctx, row_id, element))
+            let old_rows = old.map(|state| self.rows(state, ctx)).unwrap_or_default();
+            self.rows(new, ctx)
+                .iter()
+                .flat_map(|(row_id, new_element)| {
+                    self.render_pair(old, new, ctx, row_id, new_element, &old_rows)
+                })
                 .collect()
         } else {
             Vec::new()
         }
     }
 
-    fn render_row(
+    /// The `(row_id, element)` rows a state explodes into (one empty-id row when not exploding). The
+    /// row id (keyed_map entry key / array index) is a stable per-row identity.
+    fn rows(&self, state: &Value, ctx: &ProjectionContext<'_>) -> Vec<(String, Value)> {
+        match &self.explode {
+            Some(explode) => {
+                let base = StateScope {
+                    state,
+                    element: None,
+                    enrichment: ctx.enrichment,
+                };
+                explode_entries(&eval::eval(explode, &base))
+            }
+            None => vec![(String::new(), Value::Null)],
+        }
+    }
+
+    /// One row's ±1 pair, gated by the NEW row's retention so both legs ship together or neither.
+    fn render_pair(
         &self,
-        state: &Value,
-        sign: Sign,
+        old: Option<&Value>,
+        new: &Value,
         ctx: &ProjectionContext<'_>,
         row_id: &str,
-        element: &Value,
-    ) -> Option<OutMsg> {
-        let cx = StateScope {
+        new_element: &Value,
+        old_rows: &[(String, Value)],
+    ) -> Vec<OutMsg> {
+        let new_scope = self.scope(new, new_element, ctx.enrichment);
+        let new_payload = self.payload(&new_scope, Sign::Plus);
+        if self.passes_retention(&new_payload, ctx.now_secs) {
+            let emit = self.out_msg(
+                ctx,
+                Sign::Plus,
+                row_id,
+                self.key_of(&new_scope),
+                &new_payload,
+            );
+            let retract = old.zip(old_rows.iter().find(|(id, _)| id == row_id)).map(
+                |(old_state, (_, old_element))| {
+                    let old_scope = self.scope(old_state, old_element, ctx.enrichment);
+                    let old_payload = self.payload(&old_scope, Sign::Minus);
+                    self.out_msg(
+                        ctx,
+                        Sign::Minus,
+                        row_id,
+                        self.key_of(&old_scope),
+                        &old_payload,
+                    )
+                },
+            );
+            retract.into_iter().chain(std::iter::once(emit)).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Evaluation scope for a row: the state, the explode element (only when exploding), enrichment.
+    fn scope<'s>(
+        &self,
+        state: &'s Value,
+        element: &'s Value,
+        enrichment: &'s Enrichment,
+    ) -> StateScope<'s> {
+        StateScope {
             state,
             element: self.explode.as_ref().map(|_| element),
-            enrichment: ctx.enrichment,
-        };
+            enrichment,
+        }
+    }
+
+    /// A row's projected payload: `common` + `row` fields (nulls omitted) + the `sign_flag`.
+    fn payload(&self, cx: &StateScope<'_>, sign: Sign) -> Value {
         let mut obj = serde_json::Map::new();
         for (name, source) in self.common.iter().chain(self.row.iter()) {
-            let value = eval::eval(source, &cx);
+            let value = eval::eval(source, cx);
             if !value.is_null() {
                 obj.insert(name.clone(), value); // omit nulls (== omitNothingFields)
             }
@@ -103,24 +174,20 @@ impl CompiledStream {
         if self.sign_flag {
             obj.insert("sign_flag".to_string(), Value::from(sign.value()));
         }
-        let payload = Value::Object(obj);
-        // a -1 ships only with its +1: both legs are gated by retention. A row's retract (old) and
-        // emit (new) share the same retention-key value when `retention.key` is a creation-time
-        // field (the documented contract), so the pair is shipped or suppressed together — never a
-        // lone -1.
-        let should_emit = self.passes_retention(&payload, ctx.now_secs);
-        should_emit.then(|| {
-            let key = self
-                .key
-                .as_ref()
-                .and_then(|key| builtins::key_string(&eval::eval(key, &cx)))
-                .unwrap_or_default();
-            self.out_msg(ctx, sign, row_id, key, &payload)
-        })
+        Value::Object(obj)
     }
 
-    /// Build one output record, stamping the delivery envelope. The dedup/correlation ids fold in
-    /// the stream + row identity so same-topic streams and explode rows stay distinct.
+    /// The projected Kafka message key for a row (empty when the stream has no `key`).
+    fn key_of(&self, cx: &StateScope<'_>) -> String {
+        self.key
+            .as_ref()
+            .and_then(|key| builtins::key_string(&eval::eval(key, cx)))
+            .unwrap_or_default()
+    }
+
+    /// Build one output record, stamping the delivery envelope. The ids fold in the stream, the
+    /// stable aggregate key and the row identity (NOT the mutable projected key, so a row's ±1 pair
+    /// correlates even if its projected key changes).
     fn out_msg(
         &self,
         ctx: &ProjectionContext<'_>,
@@ -135,7 +202,7 @@ impl CompiledStream {
         let base: [&str; 7] = [
             &self.name,
             &self.topic,
-            &key,
+            ctx.aggregate_key,
             &ctx.causation.topic,
             &partition_text,
             &offset_text,
@@ -183,14 +250,20 @@ fn explode_entries(collection: &Value) -> Vec<(String, Value)> {
     }
 }
 
-/// Stable FNV-1a-64 over NUL-separated parts, hex-encoded (deterministic across runs).
+/// Stable FNV-1a-128 over length-prefixed parts, hex-encoded. Deterministic across runs and
+/// platforms; 128 bits keeps dedup-id birthday collisions negligible at scale. Length-prefixing
+/// (fixed 8-byte LE) is injective, so no part boundary can be forged by content.
 fn envelope_id<'a>(parts: impl Iterator<Item = &'a str>) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    let mut hash = OFFSET;
     for part in parts {
-        for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        let bytes = part.as_bytes();
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        for byte in len.to_le_bytes().iter().chain(bytes) {
+            hash ^= u128::from(*byte);
+            hash = hash.wrapping_mul(PRIME);
         }
     }
-    format!("{hash:016x}")
+    format!("{hash:032x}")
 }

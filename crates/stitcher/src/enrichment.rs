@@ -24,6 +24,8 @@ enum ReloadRejection {
     NotObject,
     /// The reload dropped a table present at boot.
     MissingBootTable,
+    /// A boot table's value is no longer an object (so `lookup` would resolve to null).
+    NonObjectTable,
 }
 
 impl ReloadRejection {
@@ -31,6 +33,7 @@ impl ReloadRejection {
         match self {
             Self::NotObject => "not_object",
             Self::MissingBootTable => "missing_boot_table",
+            Self::NonObjectTable => "non_object_table",
         }
     }
 }
@@ -77,7 +80,11 @@ impl Enrichment {
                             }
                             Err(rejection) => {
                                 metrics::enrichment_reload_rejected();
-                                tracing::warn!(path, reason = rejection.reason(), "enrichment reload rejected; keeping previous map");
+                                tracing::warn!(
+                                    path,
+                                    reason = rejection.reason(),
+                                    "enrichment reload rejected; keeping previous map"
+                                );
                             }
                         },
                         Err(e) => {
@@ -90,7 +97,8 @@ impl Enrichment {
         Ok(this)
     }
 
-    /// A reload is accepted only if it is a JSON object that still contains every boot table.
+    /// A reload is accepted only if it is a JSON object in which every boot table is still present
+    /// AND still an object (so a validated `lookup` keeps resolving).
     fn check_reload(
         fresh: &serde_json::Value,
         required: &std::collections::BTreeSet<String>,
@@ -99,9 +107,11 @@ impl Enrichment {
             None => Err(ReloadRejection::NotObject),
             Some(tables) => required
                 .iter()
-                .all(|table| tables.contains_key(table))
-                .then_some(())
-                .ok_or(ReloadRejection::MissingBootTable),
+                .try_for_each(|table| match tables.get(table) {
+                    None => Err(ReloadRejection::MissingBootTable),
+                    Some(value) if value.is_object() => Ok(()),
+                    Some(_) => Err(ReloadRejection::NonObjectTable),
+                }),
         }
     }
 

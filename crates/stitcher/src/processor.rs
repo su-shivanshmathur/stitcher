@@ -53,10 +53,10 @@ pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: stable hash of `(stream, topic, key, causation(topic/partition/offset), row_id,
-    /// sign)` — `stream` + `row_id` keep same-topic streams and explode rows distinct; the full
-    /// causation coordinate keeps cross-partition records distinct. Stable across a same-batch replay
-    /// (neutralizes the phantom `+1`).
+    /// Dedup id: stable hash of `(stream, topic, aggregate_key, causation(topic/partition/offset),
+    /// row_id, sign)` — the stable aggregate key (not the mutable projected key) anchors identity;
+    /// `stream` + `row_id` keep same-topic streams and explode rows distinct; the full causation
+    /// coordinate keeps cross-partition records distinct. Stable across a same-batch replay.
     pub event_id: String,
     /// Shared by the retract and emit of one row: the same hash minus `sign`. A `-1`/`+1` pair with
     /// one `correlation_id` is ATOMIC downstream — if the `+1` is dropped by `event_id` dedup (a
