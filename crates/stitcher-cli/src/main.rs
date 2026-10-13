@@ -92,9 +92,14 @@ fn build_projection(
     cfg: &stitcher::config::Settings,
     program: &stitcher::state::config::Program,
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
-    let tables = stitcher::enrichment::Enrichment::table_names(&cfg.enrichment)?;
+    // The runtime pipeline knows its enrichment state: an absent file is a KNOWN-EMPTY table
+    // set, so any transformer `lookup` fails validation at boot (it could only resolve to
+    // null). `None` (skip the check) is reserved for `check-transformer`, where enrichment is
+    // intentionally optional.
+    let tables =
+        stitcher::enrichment::Enrichment::table_names(&cfg.enrichment)?.unwrap_or_default();
     let configured: Box<dyn stitcher::Projection> = match &cfg.transform.config_file {
-        Some(path) => Box::new(transformer::load(path, program, tables.as_deref())?),
+        Some(path) => Box::new(transformer::load(path, program, Some(tables.as_slice()))?),
         None => Box::new(stitcher::StateLogger),
     };
     // hand-written projections join the composite here

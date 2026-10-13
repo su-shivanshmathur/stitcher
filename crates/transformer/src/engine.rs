@@ -157,9 +157,9 @@ impl CompiledStream {
     }
 
     /// One row's ±1 pair, gated by the NEW row's retention (both legs ship together or
-    /// neither). An UNCHANGED row (identical projected fields) emits nothing: a cancelling
-    /// pair is silence, and it keeps a replayed first batch (`old == new`) from pairing an
-    /// unmatched `-1` with an already-deduped `+1` (FINDINGS #3).
+    /// neither). An UNCHANGED row (identical projected fields AND routing key) emits nothing:
+    /// a cancelling pair is silence, and it keeps a replayed first batch (`old == new`) from
+    /// pairing an unmatched `-1` with an already-deduped `+1` (FINDINGS #3).
     fn render_pair(
         &self,
         new: &Value,
@@ -180,7 +180,9 @@ impl CompiledStream {
         };
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
-        if old_fields == new_fields {
+        // A key-only change is NOT a no-op: the row under the old key needs its −1 and the
+        // new key its +1 (the ids exclude the key, but the skip must not).
+        if old_fields == new_fields && self.key_of(&old_scope) == self.key_of(&new_scope) {
             return Vec::new(); // unchanged row: a cancelling pair ≡ silence
         }
         let new_payload = self.stamp_sign(new_fields, Sign::Plus);
