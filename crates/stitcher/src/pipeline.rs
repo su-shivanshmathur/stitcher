@@ -17,7 +17,7 @@ use crate::{
     kafka::{consumer::OwnedRecord, producer::KafkaProducer},
     merge::Merge,
     metrics,
-    processor::{Key, OutMsg, Processor, Sign},
+    processor::{Causation, Key, OutMsg, Processor, Sign},
     projection::{Projection, ProjectionContext},
     store::Store,
     util,
@@ -302,6 +302,26 @@ struct BatchOutcome {
     transport_error: Option<String>,
 }
 
+/// The greatest source coordinate for a key within a batch — a total order over `(topic, partition,
+/// offset)`, globally unique even across partitions (unlike a bare offset). Borrows from `records`;
+/// materialized into an owned [`Causation`] once per key at the drain.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CausationRef<'a> {
+    topic: &'a str,
+    partition: i32,
+    offset: i64,
+}
+
+impl From<CausationRef<'_>> for Causation {
+    fn from(cause: CausationRef<'_>) -> Self {
+        Self {
+            topic: cause.topic.to_string(),
+            partition: cause.partition,
+            offset: cause.offset,
+        }
+    }
+}
+
 /// One batch end-to-end (PLAN §Pipeline per batch); `ctx.dry_run` skips every side effect.
 async fn process_batch<P: Processor>(
     proc: &P,
@@ -316,9 +336,10 @@ async fn process_batch<P: Processor>(
         metrics::end_to_end_lag_seconds(lag_secs);
     }
 
-    // 2. fold into per-key states (remove+insert: no clones); each carries its max source offset
-    //    (the envelope causation token; assumes one partition per key — see OutMsg).
-    let mut states: HashMap<Key, (P::State, i64)> = HashMap::new();
+    // 2. fold into per-key states (remove+insert: no clones); each carries its greatest source
+    //    `(topic, partition, offset)` coordinate — the envelope causation token, unique even if a
+    //    key's records span partitions.
+    let mut states: HashMap<Key, (P::State, CausationRef<'_>)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
         // (a) inspect: incoming record, with its key when decodable (INSPECT.md)
@@ -339,12 +360,17 @@ async fn process_batch<P: Processor>(
                     offset = rec.offset,
                     "record decoded"
                 );
+                let cause = CausationRef {
+                    topic: rec.topic.as_str(),
+                    partition: rec.partition,
+                    offset: rec.offset,
+                };
                 match states.remove(&key) {
-                    Some((old, offset)) => {
-                        states.insert(key, (old.merge(state), offset.max(rec.offset)));
+                    Some((old, won)) => {
+                        states.insert(key, (old.merge(state), won.max(cause)));
                     }
                     None => {
-                        states.insert(key, (state, rec.offset));
+                        states.insert(key, (state, cause));
                     }
                 }
             }
@@ -363,7 +389,9 @@ async fn process_batch<P: Processor>(
         let mut msgs: Vec<OutMsg> = Vec::new();
         let mut states_to_persist: Vec<(Key, Vec<u8>)> = Vec::with_capacity(keys.len());
         let empty = P::State::default(); // inspect rendering of an absent old state (mempty)
-        for (key, (local, causation_offset)) in states {
+        for (key, (local, cause)) in states {
+            // materialize the borrowed coordinate into the owned envelope causation (once per key)
+            let causation = Causation::from(cause);
             let stored_state = match stored.get(&key) {
                 Some((version, blob)) if *version == proc.state_version() => {
                     match proc.decode_stored(blob) {
@@ -391,7 +419,7 @@ async fn process_batch<P: Processor>(
                 now_secs: now,
                 enrichment: ctx.enrichment,
                 state_version: proc.state_version(),
-                causation_offset,
+                causation: &causation,
             };
             let merged = match stored_state {
                 Some(old) => {

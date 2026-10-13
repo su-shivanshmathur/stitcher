@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     enrichment::Enrichment,
-    processor::{OutMsg, Sign},
+    processor::{Causation, OutMsg, Sign},
 };
 
 /// Wall clock, enrichment, and envelope inputs handed to a [`Projection`] per call.
@@ -14,8 +14,8 @@ pub struct ProjectionContext<'a> {
     pub enrichment: &'a Enrichment,
     /// Schema version stamped into each delta's envelope.
     pub state_version: i64,
-    /// Greatest source offset feeding this key's state — the delta's causation token.
-    pub causation_offset: i64,
+    /// The source coordinate that caused this key's state change (see [`Causation`]).
+    pub causation: &'a Causation,
 }
 
 /// Consumes one signed state change → sink records. `Send + Sync`: held across `.await`.

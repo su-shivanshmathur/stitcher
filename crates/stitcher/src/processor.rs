@@ -36,6 +36,16 @@ impl Sign {
     }
 }
 
+/// The source record that caused a delta: the greatest `(topic, partition, offset)` coordinate (by
+/// that total order) feeding the key's state in the batch. The full coordinate — not a bare offset —
+/// is globally unique even if a key's records span partitions/topics (offsets are per-partition).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Causation {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+}
+
 /// One outbound Kafka record + a delivery envelope (emitted as Kafka headers) for downstream
 /// dedup/correlation of the ±1 deltas.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,19 +53,22 @@ pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: stable hash of `(stream, topic, key, causation_offset, row_id, sign)` — `stream`
-    /// and `row_id` (keyed_map entry key / array index) keep same-topic streams and explode rows
-    /// distinct. Stable across a same-batch replay (neutralizes the phantom `+1`); see `causation_offset`.
+    /// Dedup id: stable hash of `(stream, topic, key, causation(topic/partition/offset), row_id,
+    /// sign)` — `stream` + `row_id` keep same-topic streams and explode rows distinct; the full
+    /// causation coordinate keeps cross-partition records distinct. Stable across a same-batch replay
+    /// (neutralizes the phantom `+1`).
     pub event_id: String,
-    /// Shared by the retract and emit of one row: hash of `(stream, topic, key, causation_offset, row_id)`.
+    /// Shared by the retract and emit of one row: the same hash minus `sign`. A `-1`/`+1` pair with
+    /// one `correlation_id` is ATOMIC downstream — if the `+1` is dropped by `event_id` dedup (a
+    /// same-batch replay), the `-1` MUST be dropped too, or a first-batch replay strands an orphan
+    /// retract (at-least-once; see FINDINGS #3).
     pub correlation_id: String,
     /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,
     /// Projection wall-clock, epoch seconds.
     pub produced_at: i64,
-    /// Greatest source offset feeding this key's state in the batch. Assumes one partition per key
-    /// (offsets are per-partition; cross-partition routing breaks uniqueness).
-    pub causation_offset: i64,
+    /// The source coordinate that caused this delta (see [`Causation`]).
+    pub causation: Causation,
 }
 
 /// Builds + merges state per record. Batching, store read-modify-write, commit and

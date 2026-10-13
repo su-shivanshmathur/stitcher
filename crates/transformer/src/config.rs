@@ -52,6 +52,11 @@ struct StreamDoc {
 #[serde(deny_unknown_fields)]
 struct RetentionDoc {
     days: i64,
+    /// Row timestamp field (epoch seconds) for the retention window. MUST be a creation-time
+    /// (immutable) field such as `created_at`: a row's −1 retract and +1 emit share this value, so
+    /// retention ships or suppresses the pair together. A mutable key could straddle the window and
+    /// strand a half-pair downstream. Note: a row that ages out after being emitted is never
+    /// retracted (no lone −1) — it lingers, so accumulation-only consumers need their own window.
     key: String,
 }
 

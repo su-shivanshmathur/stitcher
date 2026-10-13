@@ -104,10 +104,11 @@ impl CompiledStream {
             obj.insert("sign_flag".to_string(), Value::from(sign.value()));
         }
         let payload = Value::Object(obj);
-        // retracts always emit to cancel their +1; retention gates only +1. (Limitation: a state
-        // born outside the window emits an unmatched -1 — needs a persisted `emitted` flag; roadmap.)
-        let should_emit =
-            matches!(sign, Sign::Minus) || self.passes_retention(&payload, ctx.now_secs);
+        // a -1 ships only with its +1: both legs are gated by retention. A row's retract (old) and
+        // emit (new) share the same retention-key value when `retention.key` is a creation-time
+        // field (the documented contract), so the pair is shipped or suppressed together — never a
+        // lone -1.
+        let should_emit = self.passes_retention(&payload, ctx.now_secs);
         should_emit.then(|| {
             let key = self
                 .key
@@ -128,20 +129,24 @@ impl CompiledStream {
         key: String,
         payload: &Value,
     ) -> OutMsg {
-        let offset_text = ctx.causation_offset.to_string();
+        let partition_text = ctx.causation.partition.to_string();
+        let offset_text = ctx.causation.offset.to_string();
+        // correlation_id identifies the row's ±1 pair; event_id is the same parts plus the sign
+        let base: [&str; 7] = [
+            &self.name,
+            &self.topic,
+            &key,
+            &ctx.causation.topic,
+            &partition_text,
+            &offset_text,
+            row_id,
+        ];
         OutMsg {
-            event_id: envelope_id(&[
-                &self.name,
-                &self.topic,
-                &key,
-                &offset_text,
-                row_id,
-                sign.label(),
-            ]),
-            correlation_id: envelope_id(&[&self.name, &self.topic, &key, &offset_text, row_id]),
+            event_id: envelope_id(base.iter().copied().chain(std::iter::once(sign.label()))),
+            correlation_id: envelope_id(base.iter().copied()),
             state_version: ctx.state_version,
             produced_at: ctx.now_secs,
-            causation_offset: ctx.causation_offset,
+            causation: ctx.causation.clone(),
             topic: self.topic.clone(),
             key,
             payload: serde_json::to_vec(payload).unwrap_or_default(),
@@ -179,7 +184,7 @@ fn explode_entries(collection: &Value) -> Vec<(String, Value)> {
 }
 
 /// Stable FNV-1a-64 over NUL-separated parts, hex-encoded (deterministic across runs).
-fn envelope_id(parts: &[&str]) -> String {
+fn envelope_id<'a>(parts: impl Iterator<Item = &'a str>) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
         for byte in part.as_bytes().iter().chain(std::iter::once(&0u8)) {

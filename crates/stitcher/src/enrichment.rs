@@ -9,12 +9,30 @@ use error_stack::ResultExt;
 use crate::{
     config,
     errors::{StitcherError, StitcherResult},
+    metrics,
 };
 
 /// Shared, hot-swappable join-space. Empty `Value::Null` when no file is configured.
 #[derive(Clone)]
 pub struct Enrichment {
     state: Arc<ArcSwap<serde_json::Value>>,
+}
+
+/// Why a hot-reload was rejected (the previous map is kept).
+enum ReloadRejection {
+    /// The reloaded value is not a JSON object.
+    NotObject,
+    /// The reload dropped a table present at boot.
+    MissingBootTable,
+}
+
+impl ReloadRejection {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NotObject => "not_object",
+            Self::MissingBootTable => "missing_boot_table",
+        }
+    }
 }
 
 impl Enrichment {
@@ -34,6 +52,12 @@ impl Enrichment {
             });
         }
         let initial = Self::load_file(&cfg.config_file)?;
+        // The tables present at boot are the validated contract (transformer `lookup`s were checked
+        // against them). A reload must not drop any, or a validated lookup would silently return null.
+        let required: std::collections::BTreeSet<String> = initial
+            .as_object()
+            .map(|tables| tables.keys().cloned().collect())
+            .unwrap_or_default();
         let this = Self {
             state: Arc::new(ArcSwap::from(Arc::new(initial))),
         };
@@ -46,10 +70,16 @@ impl Enrichment {
                 loop {
                     tick.tick().await;
                     match Self::load_file(&path) {
-                        Ok(fresh) => {
-                            state.store(Arc::new(fresh));
-                            tracing::info!(path, "enrichment map reloaded");
-                        }
+                        Ok(fresh) => match Self::check_reload(&fresh, &required) {
+                            Ok(()) => {
+                                state.store(Arc::new(fresh));
+                                tracing::info!(path, "enrichment map reloaded");
+                            }
+                            Err(rejection) => {
+                                metrics::enrichment_reload_rejected();
+                                tracing::warn!(path, reason = rejection.reason(), "enrichment reload rejected; keeping previous map");
+                            }
+                        },
                         Err(e) => {
                             tracing::warn!(path, error = ?e, "enrichment reload failed; keeping previous map");
                         }
@@ -58,6 +88,21 @@ impl Enrichment {
             });
         }
         Ok(this)
+    }
+
+    /// A reload is accepted only if it is a JSON object that still contains every boot table.
+    fn check_reload(
+        fresh: &serde_json::Value,
+        required: &std::collections::BTreeSet<String>,
+    ) -> Result<(), ReloadRejection> {
+        match fresh.as_object() {
+            None => Err(ReloadRejection::NotObject),
+            Some(tables) => required
+                .iter()
+                .all(|table| tables.contains_key(table))
+                .then_some(())
+                .ok_or(ReloadRejection::MissingBootTable),
+        }
     }
 
     /// Top-level table names in the configured join-map, for validating transformer

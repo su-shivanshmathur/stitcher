@@ -551,8 +551,8 @@ fn explode_defect<'a>(expr: &'a Expr, program: &Program) -> Option<ExplodeError<
     }
 }
 
-/// Surface the trusted-by-convention frontier crossings (Phase 2 will formalize this into the
-/// `check-transformer` CLI). A down-payment: operators see the exact unverified set at boot.
+/// Surface the trusted-by-convention frontier crossings: operators see the exact unverified set.
+/// Shared by both boot and the `check-transformer` CLI (which runs this same validation path).
 fn log_opaque_surface(all_findings: &[Finding]) {
     let opaque: Vec<String> = all_findings
         .iter()

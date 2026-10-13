@@ -78,6 +78,11 @@ counter_vec!(
     &[]
 );
 counter_vec!(
+    ENRICHMENT_RELOAD_REJECTED_TOTAL,
+    "Enrichment reloads rejected (not an object, or dropped a table present at boot); previous map kept",
+    &[]
+);
+counter_vec!(
     MESSAGES_PRODUCED_TOTAL,
     "Records produced to sink topics",
     &["topic"]
@@ -162,6 +167,13 @@ pub fn dlq_produced(reason: &'static str) {
 /// One stored+incoming state pair merged.
 pub fn states_merged() {
     if let Some(counter) = &*STATES_MERGED_TOTAL {
+        counter.with_label_values(&[]).inc();
+    }
+}
+
+/// An enrichment reload rejected for dropping a boot table (or not being an object).
+pub fn enrichment_reload_rejected() {
+    if let Some(counter) = &*ENRICHMENT_RELOAD_REJECTED_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }

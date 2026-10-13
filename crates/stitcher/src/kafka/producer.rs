@@ -50,8 +50,16 @@ impl KafkaProducer {
                     value: Some(&msg.produced_at.to_string()),
                 })
                 .insert(Header {
+                    key: "causation_topic",
+                    value: Some(&msg.causation.topic),
+                })
+                .insert(Header {
+                    key: "causation_partition",
+                    value: Some(&msg.causation.partition.to_string()),
+                })
+                .insert(Header {
                     key: "causation_offset",
-                    value: Some(&msg.causation_offset.to_string()),
+                    value: Some(&msg.causation.offset.to_string()),
                 });
             let record = FutureRecord::to(&msg.topic)
                 .key(&msg.key)
