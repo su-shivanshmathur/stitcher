@@ -218,5 +218,7 @@ pub fn list(collection: &Value) -> Value {
 /// e.g. `get(latest(state.attempts), 'connector')`. `Null` on any miss.
 #[must_use]
 pub fn get_field(value: &Value, path: &str) -> Value {
-    json_util::get_path(value, path).cloned().unwrap_or(Value::Null)
+    json_util::get_path(value, path)
+        .cloned()
+        .unwrap_or(Value::Null)
 }

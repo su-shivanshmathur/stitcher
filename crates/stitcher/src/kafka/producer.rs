@@ -32,9 +32,39 @@ impl KafkaProducer {
         let started = Instant::now();
         let mut pending = Vec::with_capacity(msgs.len());
         for msg in msgs {
+            let headers = OwnedHeaders::new()
+                .insert(Header {
+                    key: "event_id",
+                    value: Some(&msg.event_id),
+                })
+                .insert(Header {
+                    key: "correlation_id",
+                    value: Some(&msg.correlation_id),
+                })
+                .insert(Header {
+                    key: "state_version",
+                    value: Some(&msg.state_version.to_string()),
+                })
+                .insert(Header {
+                    key: "produced_at",
+                    value: Some(&msg.produced_at.to_string()),
+                })
+                .insert(Header {
+                    key: "causation_topic",
+                    value: Some(&msg.causation.topic),
+                })
+                .insert(Header {
+                    key: "causation_partition",
+                    value: Some(&msg.causation.partition.to_string()),
+                })
+                .insert(Header {
+                    key: "causation_offset",
+                    value: Some(&msg.causation.offset.to_string()),
+                });
             let record = FutureRecord::to(&msg.topic)
                 .key(&msg.key)
-                .payload(&msg.payload);
+                .payload(&msg.payload)
+                .headers(headers);
             let delivery = self.producer.send_result(record).map_err(|(e, _)| {
                 error_stack::report!(StitcherError::Kafka(format!("enqueue {}: {e}", msg.topic)))
             })?;

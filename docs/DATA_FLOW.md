@@ -13,7 +13,7 @@ flowchart TD
   M --> L["config::load()<br/>layer TOML + --config-path + env → Settings"]
   M --> SC["state::config::load()<br/>→ compile() : Schema(YAML) → Program"]
   M --> BP["build_projection()<br/>transformer::load(transformer.toml) OR StateLogger"]
-  M --> RUN["stitcher::run(processor, projection, settings)<br/>crates/stitcher/src/pipeline.rs"]
+  M --> RUN["stitcher::run(processor, projection, settings, enrichment)<br/>crates/stitcher/src/pipeline.rs"]
   RUN --> BLD["crate::store::build_store(id_type) ⇒ shared Store handle<br/>(dry-run w/ unreachable store ⇒ NoStore)"]
   BLD --> OPS["crate::server::spawn(store, id_type, admin_api_key)<br/>ops HTTP thread: /metrics · /health · /state (reuses the store)"]
   BLD --> CONS["kafka::consumer::build(store)  → per-batch loop"]

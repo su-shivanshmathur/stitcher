@@ -89,9 +89,9 @@ fn apply_builtin<C: EvalContext>(builtin: Builtin, args: &[Value], cx: &C) -> Va
         (Builtin::Round, [arg]) => Value::from(builtins::round_half_even(arg).unwrap_or(0)),
         (Builtin::Trim, [arg]) => Value::from(builtins::trim(arg).unwrap_or_default()),
         (Builtin::Lower, [arg]) => Value::from(builtins::lower(arg).unwrap_or_default()),
-        (Builtin::Coalesce, [first, second]) => {
-            builtins::coalesce(first, second).cloned().unwrap_or(Value::Null)
-        }
+        (Builtin::Coalesce, [first, second]) => builtins::coalesce(first, second)
+            .cloned()
+            .unwrap_or(Value::Null),
         (Builtin::Latest, [arg]) => builtins::latest(arg),
         (Builtin::First, [arg]) => builtins::first(arg),
         (Builtin::List, [arg]) => builtins::list(arg),

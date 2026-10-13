@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, path::PathBuf};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use error_stack::ResultExt;
 use serde::Deserialize;
 
@@ -16,6 +16,10 @@ use crate::errors::{StitcherError, StitcherResult};
 #[derive(Debug, Parser)]
 #[command(name = "stitcher", about = "domain-agnostic Kafka stream aggregation")]
 pub struct Cli {
+    /// Subcommand; absent ⇒ run the streaming pipeline (the default).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Path to a TOML config layered over `config/<RUN_ENV>.toml`.
     #[arg(long = "config-path", value_name = "FILE")]
     pub config_path: Option<PathBuf>,
@@ -25,6 +29,24 @@ pub struct Cli {
     /// safe to re-run).
     #[arg(long)]
     pub inspect: bool,
+}
+
+/// CLI subcommands. The default (no subcommand) runs the pipeline.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Validate a `transformer.toml` against a `state.yaml` and exit — the boot-time
+    /// `state ⊇ transformer` check, runnable in CI (no Kafka, no store).
+    CheckTransformer {
+        /// Path to the state schema (`state.yaml`).
+        #[arg(long = "state", value_name = "FILE")]
+        state: PathBuf,
+        /// Path to the output transformer config (`transformer.toml`).
+        #[arg(long = "transformer", value_name = "FILE")]
+        transformer: PathBuf,
+        /// Optional enrichment join-map; when given, `lookup` table names are checked against it.
+        #[arg(long = "enrichment", value_name = "FILE")]
+        enrichment: Option<PathBuf>,
+    },
 }
 
 /// Root settings object.
@@ -480,13 +502,13 @@ impl Settings {
     }
 }
 
-/// Load settings: defaults → `config/<RUN_ENV>.toml` → `--config-path` → `STITCHER__*` env.
-pub fn load() -> StitcherResult<Settings> {
-    let cli = Cli::parse();
-    load_with(cli.config_path.as_deref(), cli.inspect)
+/// Parse the command line (subcommand + global flags). The binary dispatches on the result.
+#[must_use]
+pub fn parse_cli() -> Cli {
+    Cli::parse()
 }
 
-/// Testable core of [`load`].
+/// Testable core of the settings load that follows [`parse_cli`].
 pub fn load_with(
     override_path: Option<&std::path::Path>,
     inspect: bool,

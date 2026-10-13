@@ -17,7 +17,7 @@ use crate::{
     kafka::{consumer::OwnedRecord, producer::KafkaProducer},
     merge::Merge,
     metrics,
-    processor::{Key, OutMsg, Processor, Sign},
+    processor::{Causation, Key, OutMsg, Processor},
     projection::{Projection, ProjectionContext},
     store::Store,
     util,
@@ -28,11 +28,14 @@ type RawBatch<'a> = Vec<rdkafka::error::KafkaResult<rdkafka::message::BorrowedMe
 
 /// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
 /// change through `projection` (the output seam — [`crate::projection::StateLogger`] by
-/// default, or a plugged-in consumer such as the `transformer` crate).
+/// default, or a plugged-in consumer such as the `transformer` crate). The enrichment
+/// join-map is passed in, not constructed here: boot validation and the runtime share one
+/// boot snapshot.
 pub async fn run<P: Processor>(
     proc: P,
     projection: Box<dyn Projection>,
     settings: Settings,
+    enrichment: Enrichment,
 ) -> StitcherResult<()> {
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
@@ -63,7 +66,6 @@ pub async fn run<P: Processor>(
     )?;
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
-    let enrichment = Enrichment::spawn_reloader(&settings.enrichment)?;
     let guard = consumer.guard();
     let inspector = inspect::Inspect::from_cfg(&settings.debug);
     let ctx = BatchCtx {
@@ -137,7 +139,6 @@ pub async fn run<P: Processor>(
     }
     Ok(())
 }
-
 
 // ---------------------------------------------------------------------------
 // shared plumbing
@@ -303,6 +304,26 @@ struct BatchOutcome {
     transport_error: Option<String>,
 }
 
+/// The greatest source coordinate for a key within a batch — a total order over `(topic, partition,
+/// offset)`, globally unique even across partitions (unlike a bare offset). Borrows from `records`;
+/// materialized into an owned [`Causation`] once per key at the drain.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CausationRef<'a> {
+    topic: &'a str,
+    partition: i32,
+    offset: i64,
+}
+
+impl From<CausationRef<'_>> for Causation {
+    fn from(cause: CausationRef<'_>) -> Self {
+        Self {
+            topic: cause.topic.to_string(),
+            partition: cause.partition,
+            offset: cause.offset,
+        }
+    }
+}
+
 /// One batch end-to-end (PLAN §Pipeline per batch); `ctx.dry_run` skips every side effect.
 async fn process_batch<P: Processor>(
     proc: &P,
@@ -317,8 +338,10 @@ async fn process_batch<P: Processor>(
         metrics::end_to_end_lag_seconds(lag_secs);
     }
 
-    // 2. fold into per-key states (remove+insert: no clones in the hot fold)
-    let mut states: HashMap<Key, P::State> = HashMap::new();
+    // 2. fold into per-key states (remove+insert: no clones); each carries its greatest source
+    //    `(topic, partition, offset)` coordinate — the envelope causation token, unique even if a
+    //    key's records span partitions.
+    let mut states: HashMap<Key, (P::State, CausationRef<'_>)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
         // (a) inspect: incoming record, with its key when decodable (INSPECT.md)
@@ -339,12 +362,17 @@ async fn process_batch<P: Processor>(
                     offset = rec.offset,
                     "record decoded"
                 );
+                let cause = CausationRef {
+                    topic: rec.topic.as_str(),
+                    partition: rec.partition,
+                    offset: rec.offset,
+                };
                 match states.remove(&key) {
-                    Some(old) => {
-                        states.insert(key, old.merge(state));
+                    Some((old, won)) => {
+                        states.insert(key, (old.merge(state), won.max(cause)));
                     }
                     None => {
-                        states.insert(key, state);
+                        states.insert(key, (state, cause));
                     }
                 }
             }
@@ -363,7 +391,9 @@ async fn process_batch<P: Processor>(
         let mut msgs: Vec<OutMsg> = Vec::new();
         let mut states_to_persist: Vec<(Key, Vec<u8>)> = Vec::with_capacity(keys.len());
         let empty = P::State::default(); // inspect rendering of an absent old state (mempty)
-        for (key, local) in states {
+        for (key, (local, cause)) in states {
+            // materialize the borrowed coordinate into the owned envelope causation (once per key)
+            let causation = Causation::from(cause);
             let stored_state = match stored.get(&key) {
                 Some((version, blob)) if *version == proc.state_version() => {
                     match proc.decode_stored(blob) {
@@ -387,15 +417,20 @@ async fn process_batch<P: Processor>(
                     Some(old) => ctx.inspector.render_state(old),
                     None => ctx.inspector.render_state(&empty),
                 });
+            // pctx borrows `key` (aggregate_key); `key` is moved into states_to_persist only after
+            // the last pctx use (the project_transition call below) — don't reorder that push up.
             let pctx = ProjectionContext {
                 now_secs: now,
                 enrichment: ctx.enrichment,
+                state_version: proc.state_version(),
+                causation: &causation,
+                aggregate_key: key.as_str(),
             };
+            // capture the old state as a Value before `merge` consumes it (the retract leg)
+            let old_value = stored_state.as_ref().map(state_to_value);
             let merged = match stored_state {
                 Some(old) => {
                     metrics::states_merged();
-                    // -1 delta on the previously stored state
-                    msgs.extend(ctx.projection.project(&state_to_value(&old), Sign::Minus, &pctx));
                     old.merge(local)
                 }
                 None => local,
@@ -408,9 +443,14 @@ async fn process_batch<P: Processor>(
                     &ctx.inspector.render_state(&merged),
                 );
             }
-            // +1 delta: serialize merged → Value once, reuse it for the persist blob
+            // one transition: retract old (if any) + emit new, paired per row — serialize merged →
+            // Value once, reused for the persist blob
             let merged_value = state_to_value(&merged);
-            msgs.extend(ctx.projection.project(&merged_value, Sign::Plus, &pctx));
+            msgs.extend(ctx.projection.project_transition(
+                old_value.as_ref(),
+                &merged_value,
+                &pctx,
+            ));
             if ctx.dry_run {
                 continue; // inspect tap: no persist
             }
@@ -431,15 +471,11 @@ async fn process_batch<P: Processor>(
 
             // 7. dual-store persist (concurrent within the batch; concurrent dual-write
             //    inside Store::put)
-            futures::stream::iter(
-                states_to_persist
-                    .into_iter()
-                    .map(|(key, blob)| async move {
-                        store
-                            .put(proc.id_type(), &key, proc.state_version(), &blob)
-                            .await
-                    }),
-            )
+            futures::stream::iter(states_to_persist.into_iter().map(|(key, blob)| async move {
+                store
+                    .put(proc.id_type(), &key, proc.state_version(), &blob)
+                    .await
+            }))
             .buffer_unordered(ctx.read_concurrency)
             .try_collect::<Vec<()>>()
             .await?;

@@ -311,4 +311,3 @@ impl EvalContext for RecordScope<'_> {
 fn eval(expr: &Expr, record: &Value) -> Value {
     crate::eval::eval(expr, &RecordScope { record })
 }
-
