@@ -28,11 +28,14 @@ type RawBatch<'a> = Vec<rdkafka::error::KafkaResult<rdkafka::message::BorrowedMe
 
 /// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
 /// change through `projection` (the output seam — [`crate::projection::StateLogger`] by
-/// default, or a plugged-in consumer such as the `transformer` crate).
+/// default, or a plugged-in consumer such as the `transformer` crate). The enrichment
+/// join-map is passed in, not constructed here: boot validation and the runtime share one
+/// boot snapshot.
 pub async fn run<P: Processor>(
     proc: P,
     projection: Box<dyn Projection>,
     settings: Settings,
+    enrichment: Enrichment,
 ) -> StitcherResult<()> {
     // Dry-run (inspect tap) survives an unreachable store: old state just reads as absent.
     let store: Arc<dyn Store> = if settings.debug.dry_run {
@@ -63,7 +66,6 @@ pub async fn run<P: Processor>(
     )?;
     let consumer = kafka::consumer::build(&settings, Arc::clone(&store))?;
     let producer = kafka::producer::build(&settings)?;
-    let enrichment = Enrichment::spawn_reloader(&settings.enrichment)?;
     let guard = consumer.guard();
     let inspector = inspect::Inspect::from_cfg(&settings.debug);
     let ctx = BatchCtx {

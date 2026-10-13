@@ -35,11 +35,15 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
     let program = stitcher::state::config::load(&state_cfg.config_file)?;
     tracing::info!(schema = %program.aggregate, version = program.version, "loaded state config");
 
-    let projection = build_projection(&cfg, &program)?;
+    // One enrichment read at boot: validation and the runtime share this snapshot,
+    // so swapping the file between them can't desynchronize validated lookups.
+    let enrichment = stitcher::enrichment::Enrichment::spawn_reloader(&cfg.enrichment)?;
+    let projection = build_projection(&cfg, &program, &enrichment)?;
     stitcher::run(
         stitcher::state::ConfigProcessor::new(program, &cfg.tenant_ids),
         projection,
         cfg,
+        enrichment,
     )
     .await
 }
@@ -91,15 +95,18 @@ fn check_transformer(
 fn build_projection(
     cfg: &stitcher::config::Settings,
     program: &stitcher::state::config::Program,
+    enrichment: &stitcher::enrichment::Enrichment,
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
-    // The runtime pipeline knows its enrichment state: an absent file is a KNOWN-EMPTY table
-    // set, so any transformer `lookup` fails validation at boot (it could only resolve to
-    // null). `None` (skip the check) is reserved for `check-transformer`, where enrichment is
-    // intentionally optional.
-    let tables =
-        stitcher::enrichment::Enrichment::table_names(&cfg.enrichment)?.unwrap_or_default();
+    // Validation and the runtime share the SAME enrichment instance: the boot table set is
+    // what reloads must retain, so a validated `lookup` can never silently resolve to null
+    // because the file changed between validation and startup. An absent file is a
+    // KNOWN-EMPTY set — every `lookup` fails validation at boot.
     let configured: Box<dyn stitcher::Projection> = match &cfg.transform.config_file {
-        Some(path) => Box::new(transformer::load(path, program, Some(tables.as_slice()))?),
+        Some(path) => Box::new(transformer::load(
+            path,
+            program,
+            Some(enrichment.boot_tables()),
+        )?),
         None => Box::new(stitcher::StateLogger),
     };
     // hand-written projections join the composite here
@@ -112,6 +119,7 @@ fn build_projection(
 fn build_projection(
     _cfg: &stitcher::config::Settings,
     _program: &stitcher::state::config::Program,
+    _enrichment: &stitcher::enrichment::Enrichment,
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
     Ok(Box::new(stitcher::StateLogger))
 }

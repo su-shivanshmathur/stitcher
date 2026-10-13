@@ -16,6 +16,9 @@ use crate::{
 #[derive(Clone)]
 pub struct Enrichment {
     state: Arc<ArcSwap<serde_json::Value>>,
+    /// Tables captured by the single boot read — the set transformer `lookup`s are validated
+    /// against and every reload must retain. Empty when no file is configured.
+    boot_tables: Vec<String>,
 }
 
 /// Why a hot-reload was rejected (the previous map is kept).
@@ -84,6 +87,7 @@ impl Enrichment {
         if cfg.config_file.is_empty() {
             return Ok(Self {
                 state: Arc::new(ArcSwap::from(Arc::new(serde_json::Value::Null))),
+                boot_tables: Vec::new(),
             });
         }
         let initial = Self::load_file(&cfg.config_file)?;
@@ -92,17 +96,16 @@ impl Enrichment {
         // — and a map accepted at boot can never be rejected for shape by an identical reload.
         // The tables present at boot are the validated contract (transformer `lookup`s were
         // checked against them); a reload must not drop any.
-        let required: std::collections::BTreeSet<String> = Self::table_names_of(&initial)
-            .map_err(|e| {
-                error_stack::report!(StitcherError::Enrichment(format!(
-                    "enrichment file {}: {e}",
-                    cfg.config_file
-                )))
-            })?
-            .into_iter()
-            .collect();
+        let boot_tables = Self::table_names_of(&initial).map_err(|e| {
+            error_stack::report!(StitcherError::Enrichment(format!(
+                "enrichment file {}: {e}",
+                cfg.config_file
+            )))
+        })?;
+        let required: std::collections::BTreeSet<String> = boot_tables.iter().cloned().collect();
         let this = Self {
             state: Arc::new(ArcSwap::from(Arc::new(initial))),
+            boot_tables,
         };
         if cfg.reload_secs > 0 {
             let state = Arc::clone(&this.state);
@@ -159,10 +162,11 @@ impl Enrichment {
     }
 
     /// Top-level table names in the configured join-map, for validating transformer
-    /// `lookup(table, …)` references at boot. `None` ⇒ no enrichment file configured (skip the
-    /// check); `Some` (possibly empty) ⇒ the configured table set. The shape contract (root +
-    /// every table value objects) is enforced here so `check-transformer` CI catches a map whose
-    /// lookups could only ever resolve to null.
+    /// `lookup(table, …)` references in `check-transformer` (CI — the boot path uses the
+    /// instance's boot set). `None` ⇒ no enrichment file configured (skip the check);
+    /// `Some` (possibly empty) ⇒ the configured table set. The shape contract (root + every
+    /// table value objects) is enforced here so CI catches a map whose lookups could only
+    /// ever resolve to null.
     pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Option<Vec<String>>> {
         if cfg.config_file.is_empty() {
             return Ok(None);
@@ -174,6 +178,15 @@ impl Enrichment {
                 cfg.config_file
             )))
         })
+    }
+
+    /// The boot table set, captured from the single construction-time read that seeded the
+    /// runtime's map: transformer validation checks `lookup` references against it, and
+    /// reloads must retain it. Empty when no file is configured (a known-empty set — every
+    /// `lookup` fails validation).
+    #[must_use]
+    pub fn boot_tables(&self) -> &[String] {
+        &self.boot_tables
     }
 
     /// Look a key up in the join-map (top-level object members only).

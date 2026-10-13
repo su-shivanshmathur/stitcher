@@ -508,7 +508,7 @@ pub fn parse_cli() -> Cli {
     Cli::parse()
 }
 
-/// Testable core of [`load`].
+/// Testable core of the settings load that follows [`parse_cli`].
 pub fn load_with(
     override_path: Option<&std::path::Path>,
     inspect: bool,

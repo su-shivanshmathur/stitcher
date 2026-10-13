@@ -1,5 +1,5 @@
 //! `state.yaml` loading + ahead-of-time compilation (parse DSL strings once at boot,
-//! lantern #37 [pe]): the [`Program`] is everything [`super::interp`] needs at runtime.
+//! lantern #37 (pe)): the [`Program`] is everything [`super::interp`] needs at runtime.
 
 use std::collections::BTreeMap;
 use std::path::Path;
