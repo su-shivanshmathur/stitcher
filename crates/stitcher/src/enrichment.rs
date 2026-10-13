@@ -24,7 +24,7 @@ enum ReloadRejection {
     NotObject,
     /// The reload dropped a table present at boot.
     MissingBootTable,
-    /// A boot table's value is no longer an object (so `lookup` would resolve to null).
+    /// A table's value is not a JSON object (so `lookup` would resolve to null).
     NonObjectTable,
 }
 
@@ -38,12 +38,44 @@ impl ReloadRejection {
     }
 }
 
+/// Why a join-map failed the shape contract.
+enum ShapeError {
+    /// The root value is not a JSON object.
+    RootNotObject,
+    /// A table's value is not a JSON object (a string-keyed `lookup` can never resolve in an array or scalar).
+    TableNotObject(String),
+}
+
+impl std::fmt::Display for ShapeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootNotObject => write!(f, "the join-map root must be a JSON object"),
+            Self::TableNotObject(name) => {
+                write!(f, "table {name:?} must be a JSON object")
+            }
+        }
+    }
+}
+
 impl Enrichment {
     fn load_file(path: &str) -> StitcherResult<serde_json::Value> {
         let bytes = std::fs::read(path)
             .change_context(StitcherError::Enrichment(format!("read {path}")))?;
         serde_json::from_slice(&bytes)
             .change_context(StitcherError::Enrichment(format!("parse {path} as JSON")))
+    }
+
+    /// The shape contract shared by boot and reload: the root must be a JSON object AND every
+    /// table value must be an object (so a string-keyed `lookup` can resolve). Returns the
+    /// table names.
+    fn table_names_of(map: &serde_json::Value) -> Result<Vec<String>, ShapeError> {
+        let tables = map.as_object().ok_or(ShapeError::RootNotObject)?;
+        tables
+            .iter()
+            .find_map(|(name, value)| {
+                (!value.is_object()).then(|| ShapeError::TableNotObject(name.clone()))
+            })
+            .map_or_else(|| Ok(tables.keys().cloned().collect()), Err)
     }
 
     /// Load the map once, then keep it fresh in the background. A missing/blank
@@ -55,12 +87,20 @@ impl Enrichment {
             });
         }
         let initial = Self::load_file(&cfg.config_file)?;
-        // The tables present at boot are the validated contract (transformer `lookup`s were checked
-        // against them). A reload must not drop any, or a validated lookup would silently return null.
-        let required: std::collections::BTreeSet<String> = initial
-            .as_object()
-            .map(|tables| tables.keys().cloned().collect())
-            .unwrap_or_default();
+        // The boot contract IS the reload contract: the shape is enforced HERE too (not only on
+        // reloads), so startup can't install a map whose lookups would silently resolve to null
+        // — and a map accepted at boot can never be rejected for shape by an identical reload.
+        // The tables present at boot are the validated contract (transformer `lookup`s were
+        // checked against them); a reload must not drop any.
+        let required: std::collections::BTreeSet<String> = Self::table_names_of(&initial)
+            .map_err(|e| {
+                error_stack::report!(StitcherError::Enrichment(format!(
+                    "enrichment file {}: {e}",
+                    cfg.config_file
+                )))
+            })?
+            .into_iter()
+            .collect();
         let this = Self {
             state: Arc::new(ArcSwap::from(Arc::new(initial))),
         };
@@ -97,40 +137,43 @@ impl Enrichment {
         Ok(this)
     }
 
-    /// A reload is accepted only if it is a JSON object in which every boot table is still present
-    /// AND still an object (so a validated `lookup` keeps resolving).
+    /// A reload is accepted only if it keeps the shape contract — root and EVERY table value
+    /// objects, including newly added tables — AND retains every boot table (so a validated
+    /// `lookup` keeps resolving).
     fn check_reload(
         fresh: &serde_json::Value,
         required: &std::collections::BTreeSet<String>,
     ) -> Result<(), ReloadRejection> {
-        match fresh.as_object() {
-            None => Err(ReloadRejection::NotObject),
-            Some(tables) => required
-                .iter()
-                .try_for_each(|table| match tables.get(table) {
-                    None => Err(ReloadRejection::MissingBootTable),
-                    Some(value) if value.is_object() => Ok(()),
-                    Some(_) => Err(ReloadRejection::NonObjectTable),
-                }),
+        match Self::table_names_of(fresh) {
+            Err(ShapeError::RootNotObject) => Err(ReloadRejection::NotObject),
+            Err(ShapeError::TableNotObject(_)) => Err(ReloadRejection::NonObjectTable),
+            Ok(names) => {
+                let present: std::collections::BTreeSet<String> = names.into_iter().collect();
+                if present.is_superset(required) {
+                    Ok(())
+                } else {
+                    Err(ReloadRejection::MissingBootTable)
+                }
+            }
         }
     }
 
     /// Top-level table names in the configured join-map, for validating transformer
     /// `lookup(table, …)` references at boot. `None` ⇒ no enrichment file configured (skip the
-    /// check); `Some` (possibly empty) ⇒ the configured table set. A non-object file is an error.
+    /// check); `Some` (possibly empty) ⇒ the configured table set. The shape contract (root +
+    /// every table value objects) is enforced here so `check-transformer` CI catches a map whose
+    /// lookups could only ever resolve to null.
     pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Option<Vec<String>>> {
         if cfg.config_file.is_empty() {
             return Ok(None);
         }
         let map = Self::load_file(&cfg.config_file)?;
-        map.as_object()
-            .map(|tables| Some(tables.keys().cloned().collect()))
-            .ok_or_else(|| {
-                error_stack::report!(StitcherError::Enrichment(format!(
-                    "enrichment file {} must be a JSON object",
-                    cfg.config_file
-                )))
-            })
+        Self::table_names_of(&map).map(Some).map_err(|e| {
+            error_stack::report!(StitcherError::Enrichment(format!(
+                "enrichment file {}: {e}",
+                cfg.config_file
+            )))
+        })
     }
 
     /// Look a key up in the join-map (top-level object members only).

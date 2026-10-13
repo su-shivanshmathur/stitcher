@@ -54,14 +54,20 @@ pub struct OutMsg {
     pub key: Key,
     pub payload: Vec<u8>,
     /// Dedup id: stable hash of `(stream, topic, aggregate_key, causation(topic/partition/offset),
-    /// row_id, sign)` — the stable aggregate key (not the mutable projected key) anchors identity;
-    /// `stream` + `row_id` keep same-topic streams and explode rows distinct; the full causation
-    /// coordinate keeps cross-partition records distinct. Stable across a same-batch replay.
+    /// row_id, payload content, sign)`. Content (the exact serialized payload bytes) is hashed on
+    /// TOP of the causation coordinate — which stays the identity anchor: genuine re-emits of a
+    /// recurring state value keep distinct ids (different source records ⇒ different causation),
+    /// while a regrouped replay that folds a different record subset into the same max coordinate
+    /// can no longer reuse one id for two distinct events. The stable aggregate key (not the
+    /// mutable projected key) anchors identity; `stream` + `row_id` keep same-topic streams and
+    /// explode rows distinct. Stable across a same-batch replay.
     pub event_id: String,
-    /// Shared by the retract and emit of one row: the same hash minus `sign`. A `-1`/`+1` pair with
-    /// one `correlation_id` is ATOMIC downstream — if the `+1` is dropped by `event_id` dedup (a
-    /// same-batch replay), the `-1` MUST be dropped too, or a first-batch replay strands an orphan
-    /// retract (at-least-once; see FINDINGS #3).
+    /// Shared by the retract and emit of one row: the same parts minus `sign`, hashing the
+    /// transition's surviving content (the `+1` payload; the `−1` payload for a gate-close
+    /// retract). A `-1`/`+1` pair with one `correlation_id` is ATOMIC downstream — if the `+1`
+    /// is dropped by `event_id` dedup (a same-batch replay), the `-1` MUST be dropped too, or a
+    /// first-batch replay strands an orphan retract (at-least-once; see FINDINGS #3 — whose
+    /// unchanged-row case is additionally silenced upstream by the engine's no-op skip).
     pub correlation_id: String,
     /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,
