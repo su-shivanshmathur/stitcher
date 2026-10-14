@@ -2,6 +2,8 @@
 
 use std::{collections::HashMap, future::Future, sync::Arc};
 
+use futures::{StreamExt, TryStreamExt};
+
 use crate::{config, errors::StitcherResult, processor::Key};
 
 #[cfg(feature = "cql")]
@@ -41,6 +43,19 @@ pub trait Store: Send + Sync {
     /// Persist a merged state under `(id_type, key)`.
     async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()>;
 
+    /// Persist a batch of states; sequential fallback — backends override for efficiency.
+    async fn put_many(
+        &self,
+        id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
+        for (key, blob) in entries {
+            self.put(id_type, key, version, blob).await?;
+        }
+        Ok(())
+    }
+
     /// Rebalance hook (`RocksDB` creates/drops CFs).
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()>;
 
@@ -79,6 +94,30 @@ pub struct ComposedStore<L: Store, R: Store> {
     pub local: L,
     /// Authoritative remote store (CQL / stub).
     pub remote: R,
+    /// Concurrency cap for per-key remote writes in `put_many`.
+    pub write_concurrency: usize,
+}
+
+impl<L: Store, R: Store> ComposedStore<L, R> {
+    /// Fan out per-key remote puts with bounded concurrency.
+    /// Eagerly materializes futures into a `Vec` so the iterator closure lifetime
+    /// doesn't fight `buffer_unordered`'s `for<'x>` bound inside `async_trait`.
+    async fn remote_put_many(
+        &self,
+        id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
+        let futs: Vec<_> = entries
+            .iter()
+            .map(|(k, b)| self.remote.put(id_type, k, version, b))
+            .collect();
+        futures::stream::iter(futs)
+            .buffer_unordered(self.write_concurrency)
+            .try_collect::<Vec<()>>()
+            .await?;
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -109,6 +148,20 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
         Ok(())
     }
 
+    /// Batch-write: local uses a single `WriteBatch`; remote fans out with bounded concurrency.
+    async fn put_many(
+        &self,
+        id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
+        let ((), ()) = tokio::try_join!(
+            self.local.put_many(id_type, entries, version),
+            self.remote_put_many(id_type, entries, version),
+        )?;
+        Ok(())
+    }
+
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
         self.local.on_rebalance(ev).await?;
         self.remote.on_rebalance(ev).await
@@ -125,5 +178,9 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
 pub async fn build_store(cfg: &config::Settings, id_type: &str) -> StitcherResult<Arc<dyn Store>> {
     let local = rocks::RocksStore::open(&cfg.store.rocksdb, id_type)?;
     let remote = cql::CqlStore::connect(&cfg.store.cql, cfg.read_concurrency).await?;
-    Ok(Arc::new(ComposedStore { local, remote }))
+    Ok(Arc::new(ComposedStore {
+        local,
+        remote,
+        write_concurrency: cfg.read_concurrency,
+    }))
 }

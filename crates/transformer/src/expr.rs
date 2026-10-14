@@ -3,6 +3,8 @@
 //! enrichment map. The [`Expr`] walk itself lives in [`stitcher::eval`] — this only supplies
 //! the two context-specific operations.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 
 use stitcher::{enrichment::Enrichment, eval::EvalContext, json_util};
@@ -17,19 +19,20 @@ pub struct StateScope<'a> {
     pub enrichment: &'a Enrichment,
 }
 
-impl EvalContext for StateScope<'_> {
+impl<'a> EvalContext<'a> for StateScope<'a> {
     /// `state.` → the merged state, `each.` → the current element, a bare `state`/`each`
     /// → that whole value, an unprefixed path → the state (convenience).
-    fn resolve_path(&self, path: &str) -> Value {
+    fn resolve_path(&self, path: &str) -> Cow<'a, Value> {
         if let Some(rest) = path.strip_prefix("state.") {
             lookup_into(self.state, rest)
         } else if path == "state" {
-            self.state.clone()
+            Cow::Borrowed(self.state)
         } else if let Some(rest) = path.strip_prefix("each.") {
-            self.element
-                .map_or(Value::Null, |element| lookup_into(element, rest))
+            self.element.map_or(Cow::Owned(Value::Null), |element| {
+                lookup_into(element, rest)
+            })
         } else if path == "each" {
-            self.element.cloned().unwrap_or(Value::Null)
+            self.element.map_or(Cow::Owned(Value::Null), Cow::Borrowed)
         } else {
             lookup_into(self.state, path)
         }
@@ -46,8 +49,8 @@ impl EvalContext for StateScope<'_> {
     }
 }
 
-fn lookup_into(root: &Value, path: &str) -> Value {
+fn lookup_into<'a>(root: &'a Value, path: &str) -> Cow<'a, Value> {
     json_util::get_path(root, path)
-        .cloned()
-        .unwrap_or(Value::Null)
+        .map(Cow::Borrowed)
+        .unwrap_or(Cow::Owned(Value::Null))
 }

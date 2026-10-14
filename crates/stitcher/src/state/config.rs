@@ -171,7 +171,7 @@ pub fn compile(schema: &model::Schema) -> Result<Program, String> {
         aggregate: schema.aggregate.clone(),
         version: schema.version,
         id_type: schema.id_type.clone(),
-        key: compile_key(&schema.primary_key),
+        key: compile_key(&schema.primary_key).map_err(&err)?,
         filter,
         fields,
     })
@@ -246,7 +246,9 @@ fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
 }
 
 /// `"{log.a}-{log.b}"` → key-template segments (an unbalanced `{` is treated as a literal).
-fn compile_key(template: &str) -> Vec<KeySeg> {
+/// An empty hole (`{}` or `{ | }`) is a compile error: it would produce a path segment with no
+/// alternatives, which always fails at key time and silently drops every record.
+fn compile_key(template: &str) -> Result<Vec<KeySeg>, String> {
     let mut segments = Vec::new();
     let mut rest = template;
     loop {
@@ -277,5 +279,15 @@ fn compile_key(template: &str) -> Vec<KeySeg> {
             break;
         }
     }
-    segments
+    let has_empty_hole = segments
+        .iter()
+        .any(|segment| matches!(segment, KeySeg::Path(alternatives) if alternatives.is_empty()));
+    if has_empty_hole {
+        Err(format!(
+            "primary_key template {template:?} has an empty hole `{{}}` (no path); \
+             every record would be dropped"
+        ))
+    } else {
+        Ok(segments)
+    }
 }

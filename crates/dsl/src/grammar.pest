@@ -33,7 +33,14 @@ root    = @{ "$" }
 literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
-bool    = @{ "true" | "false" }
-null    = @{ "null" }
-ident   = @{ ('a'..'z' | 'A'..'Z' | "_") ~ ('a'..'z' | 'A'..'Z' | '0'..'9' | "_")* }
+// Keyword literals carry a negative lookahead: `literal` is tried before `path` in
+// `term`, and PEG commits on the first matching alternative — without the lookahead
+// a top-level field like `nullable` or `true_flag` would match the `null`/`true`
+// prefix and strand the rest of the input at EOI. The lookahead only succeeds at a
+// word boundary (a non-identifier character, or end of input).
+bool    = @{ ("true" | "false") ~ !ident_char }
+null    = @{ "null" ~ !ident_char }
+// One character that can continue an identifier.
+ident_char = { 'a'..'z' | 'A'..'Z' | '0'..'9' | "_" }
+ident   = @{ ('a'..'z' | 'A'..'Z' | "_") ~ ident_char* }
 cmp_op  = { "==" | "!=" | "<=" | ">=" | "<" | ">" }

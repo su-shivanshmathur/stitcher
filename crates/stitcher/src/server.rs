@@ -64,6 +64,11 @@ pub fn spawn(
                         .route("/health", actix_web::web::get().to(health))
                         .route("/state", actix_web::web::get().to(state_handler))
                 })
+                // The pipeline is the sole shutdown authority: it drains the in-flight batch on
+                // SIGTERM. Without this, actix installs its own SIGINT/SIGTERM handler and tears
+                // the ops server down at t=0, so /health and /metrics go dark mid-drain and trip
+                // k8s probes. The process exit after the drain reaps this thread.
+                .disable_signals()
                 .workers(1)
                 .listen(listener);
                 match built {
