@@ -1,6 +1,6 @@
-//! Small shared helpers.
+//! Shared helpers.
 
-/// Current unix time, seconds (saturating: pre-1970 clocks → 0).
+/// Saturating: pre-1970 clocks → 0.
 #[must_use]
 pub fn now_secs() -> i64 {
     i64::try_from(
@@ -11,7 +11,6 @@ pub fn now_secs() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
-/// Current unix time, nanoseconds.
 #[must_use]
 pub fn now_nanos() -> i64 {
     i64::try_from(

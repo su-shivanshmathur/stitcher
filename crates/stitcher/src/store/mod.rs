@@ -11,39 +11,30 @@ pub mod cql;
 #[cfg(feature = "rocks")]
 pub mod rocks;
 
-/// A Kafka topic-partition, carried by rebalance signals.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PartitionRef {
-    /// Source topic.
     pub topic: String,
-    /// Partition id.
     pub partition: i32,
 }
 
-/// Consumer-group rebalance signal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RebalanceEvent {
-    /// Partitions assigned.
     Assign(Vec<PartitionRef>),
-    /// Partitions revoked.
     Revoke(Vec<PartitionRef>),
 }
 
-/// Read-modify-write state store. Values are `(version, json-bytes)`; framing is a backend
-/// concern (`RocksDB`: 8-byte LE header, CQL: version column).
+/// Read-modify-write store; values are `(version, json-bytes)`.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
-    /// Fetch states for `keys`; absent keys are simply not in the map.
     async fn get_many(
         &self,
         id_type: &str,
         keys: &[Key],
     ) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>>;
 
-    /// Persist a merged state under `(id_type, key)`.
     async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()>;
 
-    /// Persist a batch of states; sequential fallback — backends override for efficiency.
+    /// Sequential fallback; backends override for efficiency.
     async fn put_many(
         &self,
         id_type: &str,
@@ -56,17 +47,13 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
-    /// Rebalance hook (`RocksDB` creates/drops CFs).
+    /// `RocksDB` creates/drops CFs.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()>;
 
-    /// Flush + release resources on shutdown.
     async fn cleanup(&self) -> StitcherResult<()>;
 }
 
-/// Execute a store operation, *then* log it — one shared site for every backend. The
-/// debug line and duration metric fire only after the future resolves, so a log line
-/// proves the work finished. Failures propagate undecorated (the backend's context
-/// already names the operation).
+/// Run the op, then log + metric — a log line proves the work finished.
 pub(crate) async fn traced<T, F, L>(
     backend: &'static str,
     metric: fn(&'static str, f64),
@@ -89,18 +76,13 @@ where
 
 /// Local-first cache + authoritative remote (read local-first, write-through both).
 pub struct ComposedStore<L: Store, R: Store> {
-    /// Local cache (`RocksDB`).
     pub local: L,
-    /// Authoritative remote store (CQL / stub).
     pub remote: R,
-    /// Concurrency cap for per-key remote writes in `put_many`.
     pub write_concurrency: usize,
 }
 
 impl<L: Store, R: Store> ComposedStore<L, R> {
-    /// Fan out per-key remote puts with bounded concurrency. Futures are eagerly
-    /// materialized into a `Vec` so the iterator closure lifetime doesn't fight
-    /// `buffer_unordered`'s `for<'x>` bound inside `async_trait`.
+    /// Futures materialized into a `Vec` — iterator lifetimes fight `buffer_unordered` in `async_trait`.
     async fn remote_put_many(
         &self,
         id_type: &str,
@@ -139,7 +121,7 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
     }
 
     async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
-        // dual write; failure of either fails the batch
+        // failure of either fails the batch
         let ((), ()) = tokio::try_join!(
             self.local.put(id_type, key, version, blob),
             self.remote.put(id_type, key, version, blob)
@@ -147,7 +129,6 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
         Ok(())
     }
 
-    /// Batch-write: local uses a single `WriteBatch`; remote fans out with bounded concurrency.
     async fn put_many(
         &self,
         id_type: &str,
@@ -172,7 +153,6 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
     }
 }
 
-/// Build the configured store: local `RocksDB` cache + remote CQL.
 #[cfg(all(feature = "rocks", feature = "cql"))]
 pub async fn build_store(cfg: &config::Settings, id_type: &str) -> StitcherResult<Arc<dyn Store>> {
     let local = rocks::RocksStore::open(&cfg.store.rocksdb, id_type)?;

@@ -15,15 +15,14 @@ use crate::merge::MergeValue;
 use crate::processor::{Key, Processor};
 use crate::state::config::{FieldProg, KeySeg, Program};
 
-/// Schema-driven `Processor` over [`MergeValue`] state: decode, merge and sink emission
-/// all run from the compiled [`Program`].
+/// Schema-driven `Processor` over [`MergeValue`].
 pub struct ConfigProcessor {
     prog: Program,
     tenant_ids: HashSet<String>,
 }
 
 impl ConfigProcessor {
-    /// Construct with a compiled program and the tenant allow-list (empty = accept all).
+    /// Empty tenant allow-list = accept all.
     #[must_use]
     pub fn new(prog: Program, tenant_ids: &[String]) -> Self {
         Self {
@@ -32,8 +31,7 @@ impl ConfigProcessor {
         }
     }
 
-    /// Admission filter: required non-empty paths, substring rejection, `log_type` and
-    /// tenant allow-lists. Rejections log their reason at `debug`.
+    /// Required paths, substring rejection, `log_type` + tenant allow-lists.
     fn admit(&self, record: &Value) -> Option<()> {
         let filter = &self.prog.filter;
         for alternative_paths in &filter.require {
@@ -164,7 +162,6 @@ impl Processor for ConfigProcessor {
     }
 }
 
-/// Field node → its contribution for one record.
 fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
     match field {
         FieldProg::LatestBy {
@@ -235,8 +232,7 @@ fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
     }
 }
 
-/// `latest_by` node contribution (comparator first, then payload — evaluation order
-/// matches the generated code's `let` sequence).
+/// Comparator first, then payload — must match the generated code's evaluation order.
 fn build_latest_by(comparator: &Expr, payload: &Expr, record: &Value) -> MergeValue {
     let comparator_value = eval(comparator, record);
     let comparator = builtins::parse_time(&comparator_value, None)
@@ -248,14 +244,13 @@ fn build_latest_by(comparator: &Expr, payload: &Expr, record: &Value) -> MergeVa
     }
 }
 
-/// Stored JSON → field value, per the compiled node kind (`MergeValue`'s JSON shape is
-/// ambiguous without it). Strict: malformed shapes ⇒ `None` (state treated absent),
-/// never a partial read.
+/// Stored JSON → field value (`MergeValue`'s JSON shape is ambiguous without the node
+/// kind). Strict: malformed shapes ⇒ `None`, never a partial read.
 fn decode_field(field: &FieldProg, stored: &Value) -> Option<MergeValue> {
     match field {
         FieldProg::LatestBy { .. } => decode_latest_by(stored),
         FieldProg::KeyedMap { .. } => {
-            // inner nodes are always latest_by (v1): each entry shape-checks directly
+            // inner nodes are always latest_by (v1)
             let entries = stored.as_object()?;
             let mut decoded = BTreeMap::new();
             for (entry_key, entry) in entries {
@@ -287,8 +282,7 @@ fn decode_latest_by(v: &Value) -> Option<MergeValue> {
     })
 }
 
-/// Evaluation scope for the state-build stage: paths resolve against one raw record;
-/// enrichment is unavailable (`lookup` ⇒ `Null`).
+/// Paths resolve against one raw record; `lookup` ⇒ `Null`.
 struct RecordScope<'a> {
     record: &'a Value,
 }
@@ -305,8 +299,7 @@ impl<'a> EvalContext<'a> for RecordScope<'a> {
     }
 }
 
-/// Evaluate a compiled expression against one record via the shared [`crate::eval`]
-/// walker; the returned `Cow` borrows from `record`'s lifetime, not the temporary scope.
+/// The returned `Cow` borrows from `record`'s lifetime, not the temporary scope.
 fn eval<'a>(expr: &Expr, record: &'a Value) -> Cow<'a, Value> {
     crate::eval::eval(expr, &RecordScope { record })
 }

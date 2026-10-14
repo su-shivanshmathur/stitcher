@@ -1,5 +1,4 @@
-//! `state.yaml` loading + ahead-of-time compilation: the [`Program`] is everything
-//! [`super::interp`] needs at runtime.
+//! `state.yaml` loading + ahead-of-time compilation into the [`Program`].
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,18 +9,14 @@ use stitcher_dsl::model;
 
 use crate::errors::{StitcherError, StitcherResult};
 
-/// One segment of the pre-parsed key template.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KeySeg {
-    /// Literal text between `{…}` holes.
     Literal(String),
-    /// A `{log.path}` hole; `|`-separated alternatives resolve to the first present value
-    /// (identity components that live at different paths across event types). All
-    /// alternatives missing (or non-string) drops the record.
+    /// A `{log.path}` hole; `|`-alternatives resolve to the first present value — all
+    /// missing (or non-string) drops the record.
     Path(Vec<String>),
 }
 
-/// Record admission filter, compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilterProg {
     /// Required non-empty paths; `|`-alternatives per entry, any one present satisfies.
@@ -39,72 +34,46 @@ pub struct FilterProg {
 /// `keyed_map` value node (v1: always `latest_by`, gated by the map's own `when`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LatestByProg {
-    /// Comparator expression (coerced to epoch nanos).
+    /// Coerced to epoch nanos.
     pub comparator: Expr,
-    /// Payload expression.
     pub payload: Expr,
 }
 
-/// One state field, compiled.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldProg {
     /// Keep payload with the max comparator.
     LatestBy {
-        /// Predicate gating extraction; falsy ⇒ identity contribution.
+        /// Falsy ⇒ identity contribution.
         when: Option<Expr>,
-        /// Comparator expression.
         comparator: Expr,
-        /// Payload expression.
         payload: Expr,
     },
     /// Map with per-key merged values; absent key ⇒ insert.
     KeyedMap {
-        /// Predicate gating entry creation.
         when: Option<Expr>,
-        /// Key expression (meaningful-only).
+        /// Meaningful-only.
         key: Expr,
-        /// Value node.
         value: Box<LatestByProg>,
     },
     /// Keep the rightmost meaningful value.
-    Last {
-        /// Predicate gating extraction.
-        when: Option<Expr>,
-        /// Value expression.
-        value: Expr,
-    },
+    Last { when: Option<Expr>, value: Expr },
     /// Keep the FIRST meaningful value (write-once / sticky).
-    Once {
-        /// Predicate gating extraction.
-        when: Option<Expr>,
-        /// Value expression.
-        value: Expr,
-    },
+    Once { when: Option<Expr>, value: Expr },
     /// Sum counter; contributes 1 per admitted (and gated) record.
-    Counter {
-        /// Predicate gating the contribution.
-        when: Option<Expr>,
-    },
+    Counter { when: Option<Expr> },
 }
 
-/// A fully compiled state schema.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
-    /// Aggregate name (diagnostics).
     pub aggregate: String,
-    /// Stored-state version.
     pub version: i64,
-    /// Store `id_type` discriminator.
     pub id_type: String,
-    /// Pre-parsed key template segments.
     pub key: Vec<KeySeg>,
-    /// Compiled admission filter.
     pub filter: FilterProg,
-    /// Compiled state fields (ordered: deterministic state serialization).
+    /// Ordered — deterministic state serialization.
     pub fields: BTreeMap<String, FieldProg>,
 }
 
-/// Load + compile a `state.yaml` from disk.
 pub fn load(path: &Path) -> StitcherResult<Program> {
     let ctx = || format!("load state config {}", path.display());
     let src = std::fs::read_to_string(path)
@@ -117,14 +86,12 @@ pub fn load(path: &Path) -> StitcherResult<Program> {
         .map_err(|e| error_stack::report!(StitcherError::Config(format!("{}: {e}", ctx()))))
 }
 
-/// Schema → [`Program`]: compile the key template, admission filter and merge-node fields.
 pub fn compile(schema: &model::Schema) -> Result<Program, String> {
     let err = |m: String| format!("[schema {}] {m}", schema.aggregate);
     if schema.aggregate.is_empty() {
         return Err(err("aggregate name must be non-empty".into()));
     }
-    // `|`-separated string → trimmed, non-empty alternatives (first-present-wins at
-    // admission/keying); shared by `require`, `log_type_path` and `tenant_path`.
+    // `|`-separated string → trimmed non-empty alternatives, first-present-wins
     let split_alts = |src: &str| -> Vec<String> {
         src.split('|')
             .map(str::trim)
@@ -171,7 +138,6 @@ pub fn compile(schema: &model::Schema) -> Result<Program, String> {
     })
 }
 
-/// Field node → compiled field.
 fn compile_field(field: &model::Field) -> Result<FieldProg, String> {
     match field {
         model::Field::LatestBy {
@@ -231,7 +197,7 @@ fn compile_when(when: &Option<String>) -> Result<Option<Expr>, String> {
     }
 }
 
-/// Compile a payload expression; omitted (`None`) ⇒ `$` (the whole record, as sent).
+/// Omitted (`None`) ⇒ `$` (the whole record).
 fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
     match payload {
         Some(src) => stitcher_dsl::expr::compile(src),
@@ -239,8 +205,7 @@ fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
     }
 }
 
-/// `"{log.a}-{log.b}"` → key-template segments (an unbalanced `{` is a literal). An empty
-/// hole (`{}` or `{ | }`) is a compile error: it would silently drop every record at key time.
+/// An empty hole (`{}`) is a compile error: it would drop every record at key time.
 fn compile_key(template: &str) -> Result<Vec<KeySeg>, String> {
     let mut segments = Vec::new();
     let mut rest = template;
@@ -261,7 +226,7 @@ fn compile_key(template: &str) -> Result<Vec<KeySeg>, String> {
                 segments.push(KeySeg::Path(alternative_paths));
                 rest = after.get(close + 1..).unwrap_or_default();
             } else {
-                // unbalanced '{' — treat it as a literal and continue after it
+                // unbalanced '{' — literal
                 segments.push(KeySeg::Literal("{".to_string()));
                 rest = after.get(1..).unwrap_or_default();
             }

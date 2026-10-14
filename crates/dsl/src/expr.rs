@@ -1,5 +1,4 @@
-//! DSL expression AST: [`compile`] parses source once into a tree evaluated at runtime by
-//! the shared `stitcher::eval` walker.
+//! DSL expression AST; parsed once by [`compile`], walked at runtime by `stitcher::eval`.
 
 use pest::iterators::Pair;
 
@@ -36,21 +35,13 @@ impl std::str::FromStr for TimeFormat {
 /// Binary operator (v1 set; single precedence level, left-associative).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinOp {
-    /// `==`
     Eq,
-    /// `!=`
     Ne,
-    /// `<`
     Lt,
-    /// `<=`
     Le,
-    /// `>`
     Gt,
-    /// `>=`
     Ge,
-    /// `&&`
     And,
-    /// `||`
     Or,
 }
 
@@ -71,7 +62,6 @@ impl BinOp {
     }
 }
 
-/// A builtin's argument-count constraint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arity {
     Exact(usize),
@@ -96,20 +86,15 @@ impl Arity {
     }
 }
 
-/// Built-in call (v1 vocabulary: `parse_time/meaningful/bucket/round/trim/lower/coalesce`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
     /// `parse_time(x)` or `parse_time(x, 'format')`
     ParseTime,
-    /// `meaningful(x)`
     Meaningful,
     /// `bucket(x, width)`
     Bucket,
-    /// `round(x)`
     Round,
-    /// `trim(x)`
     Trim,
-    /// `lower(x)`
     Lower,
     /// `coalesce(a, b)`
     Coalesce,
@@ -142,7 +127,6 @@ impl Builtin {
         Self::Lookup,
     ];
 
-    /// Canonical name as written in the DSL.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -161,7 +145,6 @@ impl Builtin {
         }
     }
 
-    /// Arity constraint for the builtin.
     #[must_use]
     pub const fn arity(self) -> Arity {
         match self {
@@ -199,31 +182,23 @@ impl std::str::FromStr for Builtin {
 /// Compiled expression tree over `serde_json::Value` records.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    /// The whole record (`$`) — the event as sent, for flat schemas with no envelope.
+    /// The whole record (`$`) — the event as sent.
     Root,
     /// Dotted record path (`log.a.b`); misses evaluate to `null`.
     Path(String),
-    /// String literal.
     Str(String),
-    /// Integer literal.
     Int(i64),
-    /// Float literal.
     Float(f64),
-    /// Boolean literal.
     Bool(bool),
-    /// `null` literal.
     Null,
     /// `!x` (truthiness negation).
     Not(Box<Self>),
-    /// Binary operation (left-associative fold).
     Bin(BinOp, Box<Self>, Box<Self>),
-    /// Built-in call; arity is checked at compile time.
+    /// Arity is checked at compile time.
     Call(Builtin, Vec<Self>),
 }
 
-/// Defensive cap on raw source length: fails fast and legibly on absurd input and bounds
-/// parse memory (the pest call limit is the real stack guard). Any real expression is
-/// orders of magnitude under this.
+/// Fails fast on absurd input; the pest call limit is the real stack guard.
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 
 /// Parse DSL source into an [`Expr`] (fails fast on syntax, unknown builtins, arity).
@@ -236,15 +211,13 @@ pub fn compile(src: &str) -> Result<Expr, String> {
     build(expr, 0)
 }
 
-/// Chars of source shown in error messages before eliding (see [`elide`]).
+/// Chars of source shown in error messages before eliding.
 const ELIDE_HEAD: usize = 80;
 
-/// Source for an error message, elided past [`ELIDE_HEAD`] chars so a long expression can't
-/// bury the actual reason.
+/// Error-message source, elided past [`ELIDE_HEAD`] chars so long input can't bury the reason.
 fn elide(src: &str) -> String {
     match src.char_indices().nth(ELIDE_HEAD) {
-        // `cut` is a char boundary by construction, so `get` is always `Some`; the empty default
-        // keeps a future refactor from silently re-embedding the full source.
+        // `cut` is a char boundary by construction; the empty default guards refactors.
         Some((cut, _)) => format!(
             "{:?}… ({} bytes)",
             src.get(..cut).unwrap_or_default(),
@@ -254,11 +227,11 @@ fn elide(src: &str) -> String {
     }
 }
 
-/// Parse error → message. pest's `Display` embeds the ENTIRE source line, so past the elide
-/// threshold print just the variant message + position; short sources keep the caret rendering.
+/// pest's `Display` embeds the ENTIRE source line, so past the elide threshold print just the
+/// variant message + position; short sources keep the caret rendering.
 fn fmt_parse_error(src: &str, e: pest::error::Error<Rule>) -> String {
     if src.len() > ELIDE_HEAD {
-        // `line_col` is a field (pest 2.9): `Pos` for point errors, a `Span` start for spans
+        // `line_col` is a field (pest 2.9)
         let (line, col) = match e.line_col {
             pest::error::LineColLocation::Pos(pos) => pos,
             pest::error::LineColLocation::Span(pos, _) => pos,
@@ -273,7 +246,6 @@ fn fmt_parse_error(src: &str, e: pest::error::Error<Rule>) -> String {
     }
 }
 
-/// Reject absurdly long source before parsing (see [`MAX_SOURCE_BYTES`]).
 fn within_source_limit(src: &str) -> Result<(), String> {
     (src.len() <= MAX_SOURCE_BYTES)
         .then_some(())
@@ -285,17 +257,15 @@ fn within_source_limit(src: &str) -> Result<(), String> {
         })
 }
 
-/// Belt-and-braces cap on the AST walk's own recursion — the pest call limit already fails
-/// deep nesting during parsing, but the walk is recursive, so the cap keeps it total.
+/// The AST walk is recursive; this cap keeps it total (pest's call limit only guards parsing).
 const MAX_DEPTH: u32 = 256;
 
-/// pest-pair → AST.
 fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
     if depth > MAX_DEPTH {
         return Err(format!("expression nested too deeply (max {MAX_DEPTH})"));
     }
     match pair.as_rule() {
-        // entry wrapper (`file = { SOI ~ or ~ EOI }`); descend to the top expression
+        // `file = { SOI ~ or ~ EOI }`; descend to the top expression
         Rule::file => {
             let inner = pair
                 .into_inner()
@@ -303,10 +273,10 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
                 .ok_or_else(|| "empty expression".to_string())?;
             build(inner, depth + 1)
         }
-        // `||` / `&&` layers: left-associative folds over same-operator children
+        // `||`/`&&`: left-associative folds
         Rule::or => fold_binary(pair, BinOp::Or, depth),
         Rule::and => fold_binary(pair, BinOp::And, depth),
-        // comparison layer: `term (cmp_op term)?` — non-associative, ≤ 1 operator.
+        // non-associative: `term (cmp_op term)?`, ≤ 1 operator
         Rule::cmp => {
             let mut inner = pair.into_inner();
             let lhs = build(inner.next().ok_or("empty cmp")?, depth + 1)?;
@@ -379,7 +349,7 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
                     args.len()
                 ));
             }
-            // reject an unknown parse_time format literal at compile time
+            // unknown parse_time format literals are rejected at compile time
             if builtin == Builtin::ParseTime {
                 if let Some(Expr::Str(fmt)) = args.get(1) {
                     fmt.parse::<TimeFormat>()?;
@@ -391,8 +361,7 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
     }
 }
 
-/// Left-associative fold of a precedence layer's same-operator children; a lone child
-/// passes through un-wrapped.
+/// Left-associative fold of a layer's same-operator children; a lone child passes through.
 fn fold_binary(pair: Pair<'_, Rule>, op: BinOp, depth: u32) -> Result<Expr, String> {
     let mut inner = pair.into_inner();
     let mut acc = build(inner.next().ok_or("empty binary layer")?, depth + 1)?;
@@ -402,7 +371,6 @@ fn fold_binary(pair: Pair<'_, Rule>, op: BinOp, depth: u32) -> Result<Expr, Stri
     Ok(acc)
 }
 
-/// Map a `cmp_op` token to its [`BinOp`] (the mapping lives on `BinOp`).
 fn cmp_op(op: &str) -> Result<BinOp, String> {
     BinOp::from_comparison(op).ok_or_else(|| format!("unsupported comparison operator {op:?}"))
 }

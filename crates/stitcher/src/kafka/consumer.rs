@@ -1,6 +1,5 @@
-//! Kafka consumer with rebalance-aware context: manual commits after persist
-//! (at-least-once); a revoke drains the in-flight batch, then wipes the RocksDB cache;
-//! rdkafka statistics feed the `consumer_lag` gauges.
+//! Manual post-persist commits (at-least-once); a revoke drains the in-flight batch, then
+//! wipes the local cache.
 
 use std::{
     sync::{
@@ -24,7 +23,6 @@ use crate::{
     store::{PartitionRef, RebalanceEvent, Store},
 };
 
-/// Shared pipeline ↔ rebalance-callback coordination.
 #[derive(Clone)]
 pub struct RebalanceGuard {
     drained_flag: Arc<AtomicBool>,
@@ -33,9 +31,7 @@ pub struct RebalanceGuard {
 }
 
 impl RebalanceGuard {
-    /// Mark a batch as in-flight; the token decrements on **drop**, so every exit path
-    /// (early `?`, timeout, aborted future) releases the rebalance drain. `None` while a
-    /// revoke drain is pending — start no new work in that window.
+    /// Token decrements on drop; `None` while a revoke drain is pending.
     #[must_use]
     pub fn begin_batch(&self) -> Option<BatchToken<'_>> {
         if self.drained_flag.load(Ordering::SeqCst) {
@@ -50,16 +46,13 @@ impl RebalanceGuard {
         Some(BatchToken(self))
     }
 
-    /// True while a revoke is waiting for the pipeline to drain.
     #[must_use]
     pub fn is_draining(&self) -> bool {
         self.drained_flag.load(Ordering::SeqCst)
     }
 }
 
-/// RAII in-flight token returned by [`RebalanceGuard::begin_batch`]. Holding it for the
-/// whole batch makes the count abort-safe: an early return or dropped future cannot
-/// strand `in_flight > 0` and hang the rebalance drain on shutdown.
+/// RAII — early returns / dropped futures can't strand `in_flight > 0` and hang the drain.
 #[must_use]
 pub struct BatchToken<'a>(&'a RebalanceGuard);
 
@@ -69,14 +62,12 @@ impl Drop for BatchToken<'_> {
     }
 }
 
-/// rdkafka client context wiring stats + rebalance into the store.
 pub struct StitcherCtx {
     store: Arc<dyn Store>,
     guard: RebalanceGuard,
 }
 
 impl ClientContext for StitcherCtx {
-    /// rdkafka ships parsed statistics (`statistics.interval.ms` set at build).
     fn stats(&self, statistics: rdkafka::statistics::Statistics) {
         for (topic_name, topic) in &statistics.topics {
             for (partition, part) in &topic.partitions {
@@ -87,8 +78,7 @@ impl ClientContext for StitcherCtx {
 }
 
 impl ConsumerContext for StitcherCtx {
-    /// Broker acknowledgement of the async offset commit — the *true* receipt;
-    /// the `commit` call itself only queues the request.
+    /// Broker ack of the async commit — the call only queues it.
     fn commit_callback(
         &self,
         result: rdkafka::error::KafkaResult<()>,
@@ -117,7 +107,7 @@ impl ConsumerContext for StitcherCtx {
     fn pre_rebalance(&self, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(tpl) = rebalance {
             self.guard.drained_flag.store(true, Ordering::SeqCst);
-            // Wait (bounded) for the in-flight batch to finish, then wipe revoked column-family contents.
+            // wait (bounded) for the in-flight batch, then wipe
             let started = Instant::now();
             while self.guard.in_flight.load(Ordering::SeqCst) > 0
                 && started.elapsed() < self.guard.drain_timeout
@@ -171,14 +161,12 @@ fn tpl_parts(tpl: &TopicPartitionList) -> Vec<PartitionRef> {
         .collect()
 }
 
-/// The pipeline-facing consumer handle.
 pub struct KafkaConsumer {
     consumer: StreamConsumer<StitcherCtx>,
     guard: RebalanceGuard,
 }
 
 impl KafkaConsumer {
-    /// Subscribed stream of messages.
     pub fn stream(
         &self,
     ) -> impl futures::Stream<Item = rdkafka::error::KafkaResult<rdkafka::message::BorrowedMessage<'_>>>
@@ -186,17 +174,13 @@ impl KafkaConsumer {
         self.consumer.stream()
     }
 
-    /// Coordination handle for the pipeline loop.
     #[must_use]
     pub fn guard(&self) -> RebalanceGuard {
         self.guard.clone()
     }
 
-    /// Explicit commit of a processed batch's watermarks (see [`batch_watermarks`]).
-    /// `enable.auto.offset.store=false` means "commit current positions" would be a
-    /// silent no-op — the offsets come from what the batch actually finished. Async:
-    /// the broker's ack lands in [`StitcherCtx::commit_callback`]. Retry ×3 covers
-    /// queue-side failures.
+    /// Offsets are never stored implicitly, so they come only from finished work. Async;
+    /// retry ×3.
     pub async fn commit(&self, watermarks: &[PartitionWatermark]) -> StitcherResult<()> {
         if watermarks.is_empty() {
             return Ok(()); // nothing processed in this batch
@@ -232,13 +216,10 @@ impl KafkaConsumer {
     }
 }
 
-/// One partition's commit position: `(topic, partition, next_offset_to_consume)`.
+/// `(topic, partition, next_offset_to_consume)`.
 pub type PartitionWatermark = (String, i32, i64);
 
-/// Per-partition commit watermark for a consumed batch: max offset + 1 per
-/// (topic, partition) — exactly the range the batch finished. Error records carry
-/// no offset and don't advance the watermark (they replay). Sorted for
-/// deterministic logs/commits.
+/// Max offset + 1 per (topic, partition); error records don't advance it (they replay).
 #[must_use]
 pub fn batch_watermarks(
     records: &[rdkafka::error::KafkaResult<rdkafka::message::BorrowedMessage<'_>>],
@@ -257,7 +238,6 @@ pub fn batch_watermarks(
         .collect()
 }
 
-/// Build + subscribe the consumer.
 pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<KafkaConsumer> {
     let guard = RebalanceGuard {
         drained_flag: Arc::new(AtomicBool::new(false)),
@@ -270,8 +250,7 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     };
 
     let mut conf = ClientConfig::new();
-    // Dry-run (inspect tap): a fresh random group per run so the tap never disturbs
-    // the real pipeline's offsets and can be freely re-run.
+    // dry-run: fresh random group so the tap never disturbs real offsets
     let group_id = if cfg.debug.dry_run {
         format!(
             "{}-inspect-{}",
@@ -283,10 +262,8 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     };
     conf.set("bootstrap.servers", cfg.source_kafka.brokers.join(","))
         .set("group.id", &group_id)
-        // load-bearing for the at-least-once protocol: commits are explicit per-batch
-        // watermarks after persist (never auto), offsets are never stored implicitly,
-        // and partition-EOF events would inject errors into the batch stream. `extra`
-        // remains the escape hatch for exotic setups.
+        // at-least-once protocol knobs — explicit watermark commits, no implicit offset
+        // storage, no partition-EOF errors
         .set("enable.auto.commit", "false")
         .set("enable.partition.eof", "false")
         .set("enable.auto.offset.store", "false")
@@ -314,23 +291,17 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     Ok(KafkaConsumer { consumer, guard })
 }
 
-/// One owned message: payload copied across the await boundary.
 #[derive(Clone, Debug)]
 pub struct OwnedRecord {
-    /// Source topic.
     pub topic: String,
-    /// Source partition.
     pub partition: i32,
-    /// Source offset.
     pub offset: i64,
-    /// Kafka timestamp (ms, when present) for backlog/lag metrics.
     pub timestamp_ms: Option<i64>,
-    /// Owned payload bytes.
     pub payload: Vec<u8>,
 }
 
 impl OwnedRecord {
-    /// Copy out of a borrowed message; `None` payload → empty bytes (will be routed to DLQ).
+    /// `None` payload → empty bytes (routed to DLQ).
     #[must_use]
     pub fn from_borrowed(msg: &rdkafka::message::BorrowedMessage<'_>) -> Self {
         Self {

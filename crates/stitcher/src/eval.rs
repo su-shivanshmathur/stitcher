@@ -1,6 +1,5 @@
-//! One evaluator for the whole DSL: the [`Expr`] walk, operator semantics and builtin
-//! dispatch are shared; contexts differ only in path resolution and enrichment
-//! availability ([`EvalContext`]), keeping their semantics identical by construction.
+//! One evaluator for the whole DSL; contexts differ only in path resolution + enrichment
+//! ([`EvalContext`]), keeping semantics identical by construction.
 
 use std::borrow::Cow;
 
@@ -9,26 +8,24 @@ use stitcher_dsl::expr::{BinOp, Builtin, Expr, TimeFormat};
 
 use crate::{builtins, json_util};
 
-/// The scope an [`Expr`] evaluates against. The lifetime `'a` is tied to the DATA the
-/// scope borrows (the record or merged state), not to `&self` — so `resolve_path`/`root`
-/// can return `Borrowed` references that outlive the short-lived scope struct itself.
+/// The scope an [`Expr`] evaluates against. `'a` is tied to the DATA the scope borrows,
+/// not `&self` — returned `Borrowed` refs outlive the short-lived scope struct.
 pub trait EvalContext<'a> {
-    /// Resolve a dotted path to a value; a miss yields [`Value::Null`].
+    /// A miss yields [`Value::Null`].
     fn resolve_path(&self, path: &str) -> Cow<'a, Value>;
 
-    /// `$` — the whole record, as sent. Default: unavailable ⇒ `Null`.
+    /// `$` — the whole record. Default: unavailable ⇒ `Null`.
     fn root(&self) -> Cow<'a, Value> {
         Cow::Owned(Value::Null)
     }
 
-    /// `lookup(table, key)` enrichment join. Default: unavailable ⇒ `Null`.
+    /// `lookup(table, key)`. Default: unavailable ⇒ `Null`.
     fn lookup(&self, _table: &str, _key: &str) -> Value {
         Value::Null
     }
 }
 
-/// Evaluate an expression in `cx`. Total: unresolved paths yield `Null`, non-numeric
-/// comparisons yield `false`; never panics.
+/// Total: misses yield `Null`, non-numeric comparisons yield `false`; never panics.
 pub fn eval<'a, C: EvalContext<'a>>(expr: &Expr, cx: &C) -> Cow<'a, Value> {
     match expr {
         Expr::Root => cx.root(),
@@ -57,7 +54,7 @@ fn apply_bin(op: BinOp, lhs: &Value, rhs: &Value) -> Value {
     }
 }
 
-/// Evaluate builtins lazily — each arg is evaluated inline, avoiding a per-call `Vec<Value>`.
+/// Lazy per-arg evaluation — no per-call `Vec<Value>`.
 fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C) -> Value {
     match (builtin, args) {
         (Builtin::ParseTime, [arg]) => {
@@ -117,7 +114,6 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
     }
 }
 
-/// Numeric comparison via `value_as_f64` views (non-numeric ⇒ false).
 fn num_cmp(l: &Value, r: &Value, op: impl FnOnce(f64, f64) -> bool) -> Value {
     Value::from(
         match (builtins::value_as_f64(l), builtins::value_as_f64(r)) {

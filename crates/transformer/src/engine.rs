@@ -1,5 +1,4 @@
-//! The transform engine: one merged state `Value` → `Vec<OutMsg>` across the configured
-//! streams — gate-diff old/new, project (optionally exploding a map into per-entry rows),
+//! One merged state `Value` → `Vec<OutMsg>` across streams: gate-diff old/new, project,
 //! stamp `sign_flag`, retention-filter.
 
 use std::{borrow::Cow, collections::HashMap};
@@ -16,7 +15,6 @@ use stitcher::{
     projection::{Projection, ProjectionContext},
 };
 
-/// A compiled `transformer.toml`: the ordered set of output streams.
 pub struct Transform {
     streams: Vec<CompiledStream>,
 }
@@ -27,9 +25,8 @@ pub(super) struct Retention {
     pub key: String,
 }
 
-/// One compiled output stream.
 pub(super) struct CompiledStream {
-    /// Stream name (globally unique; folded into envelope ids so same-topic streams don't collide).
+    /// Globally unique; folded into envelope ids so same-topic streams don't collide.
     pub name: String,
     pub topic: String,
     pub sign_flag: bool,
@@ -48,7 +45,6 @@ impl Transform {
 }
 
 impl Projection for Transform {
-    /// Project a state transition into sink records across every stream (retract `old`, emit `new`).
     fn project_transition(
         &self,
         old: Option<&Value>,
@@ -63,11 +59,9 @@ impl Projection for Transform {
 }
 
 impl CompiledStream {
-    /// Old/new gate row-set difference — never an orphan `-1` (never-emitted row) nor a
-    /// stranded `+1` (emitted row gated out): open→open pairs per row, closed→open only
-    /// `+1`s, open→closed only `-1`s. Retention gates a pair on the NEW payload and a
-    /// close-retract on the OLD — orphan-free because retention keys are creation-time
-    /// immutable (fresh-now ⇒ fresh-at-emit).
+    /// Old/new gate row-set diff — orphan-free: open→open pairs per row, closed→open only
+    /// `+1`s, open→closed only `-1`s. Retention gates a pair on the NEW payload (retention
+    /// keys are creation-time immutable, so a pair can't be split).
     fn render_transition(
         &self,
         old: Option<&Value>,
@@ -126,8 +120,7 @@ impl CompiledStream {
         }
     }
 
-    /// Evaluate the stream's `explode` expression (`None` when not exploding); borrows from
-    /// `state` — `ctx` must supply enrichment for at least as long.
+    /// `None` when not exploding; borrows from `state` — `ctx` must outlive it.
     fn eval_explode<'s>(
         &self,
         state: &'s Value,
@@ -143,8 +136,7 @@ impl CompiledStream {
         })
     }
 
-    /// Rows of an explode collection (borrowed), or the empty-id sentinel row when not
-    /// exploding; row id = keyed_map key / array index (stable identity).
+    /// Explode-collection rows (borrowed) or the sentinel row; row id = keyed_map key / array index.
     fn rows_of(exploded: Option<&Value>) -> Vec<(String, &Value)> {
         match exploded {
             Some(collection) => explode_entries(collection),
@@ -152,9 +144,8 @@ impl CompiledStream {
         }
     }
 
-    /// One row's ±1 pair, retention-gated on the NEW payload (both legs ship together or
-    /// neither). An unchanged row (projected fields AND routing key) emits nothing: a
-    /// cancelling pair is silence, and it keeps a replayed first batch from pairing an
+    /// One row's ±1 pair, retention-gated on the NEW payload. An unchanged row (projected
+    /// fields AND routing key) is silence — keeps a replayed first batch from pairing an
     /// unmatched `-1` with an already-deduped `+1`.
     fn render_pair(
         &self,
@@ -174,8 +165,8 @@ impl CompiledStream {
                 .into_iter()
                 .collect();
         };
-        // Retract content is recomputed with the LIVE enrichment map — a reload between emit
-        // and retract can shift the −1's fields (known limit).
+        // Retract content is recomputed with the LIVE enrichment map — a reload between
+        // emit and retract can shift the −1's fields (known limit).
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
         // A key-only change is NOT a no-op: the old key needs its −1, the new key its +1.
@@ -233,7 +224,7 @@ impl CompiledStream {
         })
     }
 
-    /// Evaluation scope for a row: the state, the explode element (only when exploding), enrichment.
+    /// Evaluation scope for a row: state, explode element, enrichment.
     fn scope<'s>(
         &self,
         state: &'s Value,
@@ -247,8 +238,8 @@ impl CompiledStream {
         }
     }
 
-    /// A row's projected fields: `common` + `row` (nulls omitted) — sign is stamped
-    /// separately so skip-comparisons see content, not the ±1.
+    /// `common` + `row` (nulls omitted); sign stamped separately so skip-comparisons see
+    /// content, not the ±1.
     fn project(&self, cx: &StateScope<'_>) -> serde_json::Map<String, Value> {
         let mut obj = serde_json::Map::new();
         for (name, source) in self.common.iter().chain(self.row.iter()) {
@@ -260,7 +251,6 @@ impl CompiledStream {
         obj
     }
 
-    /// Stamp the `sign_flag` onto projected fields (payload = fields + the optional ±1 stamp).
     fn stamp_sign(&self, mut fields: serde_json::Map<String, Value>, sign: Sign) -> Value {
         if self.sign_flag {
             fields.insert("sign_flag".to_string(), Value::from(sign.value()));
@@ -268,7 +258,7 @@ impl CompiledStream {
         Value::Object(fields)
     }
 
-    /// The projected Kafka message key for a row (empty when the stream has no `key`).
+    /// Projected Kafka key (empty when the stream has no `key`).
     fn key_of(&self, cx: &StateScope<'_>) -> String {
         self.key
             .as_ref()
@@ -276,7 +266,7 @@ impl CompiledStream {
             .unwrap_or_default()
     }
 
-    /// Shared id-computation base: the 7 stable parts plus row-specific content.
+    /// The 7 stable parts plus row-specific content.
     fn id_base<'x>(
         &'x self,
         ctx: &'x ProjectionContext<'x>,
@@ -295,8 +285,8 @@ impl CompiledStream {
         ]
     }
 
-    /// Build one output record that self-correlates (lone emits, close retracts, a pair's
-    /// `+1`); payload bytes moved in — hashed and shipped from one buffer.
+    /// Self-correlating record (lone emits, close retracts, a pair's `+1`); payload bytes
+    /// moved in — hashed and shipped from one buffer.
     fn out_msg_self(
         &self,
         ctx: &ProjectionContext<'_>,
@@ -332,8 +322,8 @@ impl CompiledStream {
         }
     }
 
-    /// Build the `-1` leg of a pair: event_id hashes its own payload + sign, but correlation_id
-    /// anchors on `correlation` (the surviving `+1` content), so the pair shares one correlation.
+    /// The `-1` leg: event_id hashes its own payload + sign, correlation_id anchors on the
+    /// surviving `+1` content, so the pair shares one correlation.
     fn out_msg_paired(
         &self,
         ctx: &ProjectionContext<'_>,
@@ -369,8 +359,7 @@ impl CompiledStream {
         }
     }
 
-    /// Keep a row unless its retention timestamp is older than the window; a missing or
-    /// unparseable timestamp is RETAINED (no silent loss).
+    /// Missing or unparseable timestamp is RETAINED (no silent loss).
     fn passes_retention(&self, payload: &Value, now_secs: i64) -> bool {
         self.retention.as_ref().is_none_or(|retention| {
             json_util::get_path(payload, &retention.key)
@@ -380,8 +369,7 @@ impl CompiledStream {
     }
 }
 
-/// `explode` a keyed map into `(entry key, &entry)` rows or an array into `(index, &item)`
-/// rows; anything else ⇒ no rows.
+/// keyed map → `(key, &entry)` rows, array → `(index, &item)`; anything else ⇒ no rows.
 fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
     match collection {
         Value::Object(entries) => entries
@@ -393,14 +381,13 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
             .enumerate()
             .map(|(index, value)| (index.to_string(), value))
             .collect(),
-        // Null = merge identity (an absent collection is expected, and it recurs every
-        // transition): debug, not warn.
+        // Null = merge identity (expected, recurs every transition): debug, not warn.
         Value::Null => {
             tracing::debug!("explode: absent (null) collection; no rows emitted");
             Vec::new()
         }
-        // A non-null scalar where a collection was expected is malformed stored state — the
-        // row(s) vanish with no ±1, so surface it (kind only; the value may be sensitive).
+        // Malformed stored state — the row(s) vanish with no ±1, so surface it (kind only;
+        // the value may be sensitive).
         Value::Bool(_) | Value::Number(_) | Value::String(_) => {
             let kind = match collection {
                 Value::Bool(_) => "bool",
@@ -419,14 +406,13 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
 /// Non-explode sentinel element (module-level so [`CompiledStream::rows_of`] can borrow it).
 static NULL_ROW: Value = Value::Null;
 
-/// Serialize a payload once — the record bytes AND the id-hash input (one source of truth).
-/// Deterministic: `Map` is BTreeMap-backed (no `preserve_order`), so `to_vec` is key-sorted.
+/// Record bytes AND id-hash input from one buffer; BTreeMap `Map` ⇒ key-sorted, deterministic.
 fn serialize(payload: &Value) -> Vec<u8> {
     serde_json::to_vec(payload).unwrap_or_default()
 }
 
-/// Stable FNV-1a-128 over length-prefixed byte parts, hex-encoded: 128 bits keeps birthday
-/// collisions negligible; length-prefixing is injective, so part boundaries can't be forged.
+/// FNV-1a-128 over length-prefixed parts, hex — birthday-safe; length-prefixing is injective,
+/// so part boundaries can't be forged.
 fn envelope_id<'a>(parts: impl Iterator<Item = &'a [u8]>) -> String {
     const OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
     const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;

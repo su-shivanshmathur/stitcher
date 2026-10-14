@@ -1,5 +1,4 @@
-//! Settings: `config/<RUN_ENV>.toml` + optional `--config-path` file + `STITCHER__*` env
-//! overrides; `serde_path_to_error` pinpoints bad fields.
+//! Settings: `config/<RUN_ENV>.toml` + optional `--config-path` + `STITCHER__*` env overrides.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -11,73 +10,56 @@ use crate::secret::Secret;
 
 use crate::errors::{StitcherError, StitcherResult};
 
-/// CLI entry: the config path (everything else lives in the TOML/env layers) and the
-/// inspect-mode shorthand.
 #[derive(Debug, Parser)]
 #[command(name = "stitcher", about = "domain-agnostic Kafka stream aggregation")]
 pub struct Cli {
-    /// Subcommand; absent ⇒ run the streaming pipeline (the default).
+    /// Absent ⇒ run the streaming pipeline.
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Path to a TOML config layered over `config/<RUN_ENV>.toml`.
+    /// TOML config layered over `config/<RUN_ENV>.toml`.
     #[arg(long = "config-path", value_name = "FILE")]
     pub config_path: Option<PathBuf>,
 
-    /// Inspect mode: print incoming records, old→merged states and outgoing sink records;
-    /// write/produce/commit NOTHING (fresh consumer group; safe to re-run).
+    /// Inspect mode: print in/state/out, write/produce/commit nothing (fresh group, re-runnable).
     #[arg(long)]
     pub inspect: bool,
 }
 
-/// CLI subcommands. The default (no subcommand) runs the pipeline.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Validate a `transformer.toml` against a `state.yaml` and exit — the boot-time
-    /// `state ⊇ transformer` check, runnable in CI.
+    /// Validate a `transformer.toml` against a `state.yaml` and exit (CI-runnable).
     CheckTransformer {
-        /// Path to the state schema (`state.yaml`).
         #[arg(long = "state", value_name = "FILE")]
         state: PathBuf,
-        /// Path to the output transformer config (`transformer.toml`).
         #[arg(long = "transformer", value_name = "FILE")]
         transformer: PathBuf,
-        /// Optional enrichment join-map; when given, `lookup` table names are checked against it.
+        /// When given, `lookup` table names are checked against it.
         #[arg(long = "enrichment", value_name = "FILE")]
         enrichment: Option<PathBuf>,
     },
 }
 
-/// Root settings object.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Metrics/health HTTP server.
     pub server: Server,
-    /// Logging.
     pub log: LogCfg,
-    /// Source cluster (consumed topics).
     pub source_kafka: SourceKafka,
-    /// Sink cluster (produced deltas + DLQ).
     pub sink_kafka: SinkKafka,
-    /// Aggregation batching: count OR time, whichever hits first.
+    /// Count OR time, whichever hits first.
     pub batch: Batch,
-    /// State store(s).
     pub store: StoreCfg,
     /// State-machine config for the generic binary (`state.yaml`).
     pub state: Option<StateCfg>,
-    /// Config-driven output transformer (`transformer.toml`); absent ⇒ passthrough `encode`.
+    /// Output transformer (`transformer.toml`); absent ⇒ passthrough `encode`.
     pub transform: TransformCfg,
-    /// Enrichment join-map reload.
     pub enrichment: Enrichment,
-    /// Tenant allow-list (== `--tenant-id`).
+    /// Tenant allow-list.
     pub tenant_ids: Vec<String>,
-    /// Inspect mode (dev/staging introspection).
     pub debug: DebugCfg,
-    /// Cap (seconds) on processing the final in-flight batch during shutdown. Keep below
-    /// the orchestrator's kill deadline (k8s `terminationGracePeriodSeconds`, ~30s) minus
-    /// the producer flush budget: on timeout the batch aborts pre-commit and replays on
-    /// restart (at-least-once) — safer than a SIGKILL mid-write. `None` = unbounded.
+    /// Cap (secs) on the final in-flight batch during shutdown — keep below the orchestrator
+    /// kill deadline (timeout ⇒ pre-commit abort ⇒ replay). `None` = unbounded.
     pub shutdown_grace_secs: Option<u64>,
     /// Max concurrent remote reads within a batch.
     pub read_concurrency: usize,
@@ -85,42 +67,33 @@ pub struct Settings {
     pub rebalance_drain_secs: u64,
 }
 
-/// Metrics + health endpoint.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Server {
-    /// Bind host.
     pub host: String,
-    /// Bind port (== `--prometheus-port`).
     pub port: u16,
-    /// Admin API key gating `GET /state` (raw session PII), sent as the `api-key` header.
-    /// Unset ⇒ `/state` rejects every request (401).
+    /// Gates `GET /state` via the `api-key` header; unset ⇒ every request 401.
     pub admin_api_key: Option<Secret<String>>,
 }
 
-/// Logging (`tracing-subscriber`: JSON or human-readable console; `RUST_LOG` wins).
+/// `RUST_LOG` wins over this level.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LogCfg {
-    /// Global filtering directive, e.g. `"info,libsasl2=warn"`.
+    /// Filtering directive, e.g. `"info,libsasl2=warn"`.
     pub level: String,
-    /// `json` | `console` (human-readable).
     pub format: LogFormat,
 }
 
-/// Console log formatting.
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
-    /// Compact single-line JSON.
     #[default]
     Json,
-    /// Human-readable multi-line.
     HumanReadable,
 }
 
-/// Extra librdkafka properties. `Debug` redacts values whose key looks secret so a startup
-/// config dump can't leak `sasl.password` / `ssl.key.password`.
+/// Extra librdkafka properties; `Debug` redacts secret-looking values.
 #[derive(Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct KafkaExtra(pub HashMap<String, String>);
@@ -146,32 +119,25 @@ impl std::fmt::Debug for KafkaExtra {
     }
 }
 
-/// Source Kafka.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SourceKafka {
     /// `bootstrap.servers`.
     pub brokers: Vec<String>,
-    /// Topics to subscribe (== `--topics`).
     pub topics: Vec<String>,
-    /// Consumer group id (== `--consumer-group-id`).
     pub consumer_group: String,
-    /// Where a group without committed offsets starts: `"earliest"` or `"latest"`
-    /// (passed to `auto.offset.reset`).
+    /// `"earliest"` | `"latest"` for groups without committed offsets (`auto.offset.reset`).
     pub auto_offset_reset: String,
-    /// librdkafka statistics interval in ms (feeds the consumer-lag gauges); `0` disables.
+    /// librdkafka stats interval, ms; `0` disables.
     pub statistics_interval_ms: u64,
-    /// Extra librdkafka consumer properties (e.g. `partition.assignment.strategy`).
     pub extra: KafkaExtra,
 }
 
-/// Sink Kafka.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SinkKafka {
     /// `bootstrap.servers`.
     pub brokers: Vec<String>,
-    /// Extra librdkafka producer properties.
     pub extra: KafkaExtra,
     /// Dead-letter topic for malformed records.
     pub dlq_topic: String,
@@ -179,7 +145,6 @@ pub struct SinkKafka {
     pub delivery_timeout_secs: u64,
 }
 
-/// Batching (== `--aggregation-batch-count` / `--aggregation-window-ms`).
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default)]
 pub struct Batch {
@@ -189,117 +154,87 @@ pub struct Batch {
     pub window_ms: u64,
 }
 
-/// Store selection + backend configs.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct StoreCfg {
-    /// Which remote backend persists merged state.
     pub backend: Backend,
-    /// CQL (`ScyllaDB` / Cassandra).
     pub cql: CqlCfg,
-    /// Local `RocksDB` cache.
     pub rocksdb: RocksCfg,
 }
 
-/// Remote backend selection.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
-    /// `ScyllaDB` / Cassandra via the `scylla` CQL driver.
     #[default]
     Cql,
 }
 
-/// CQL connection settings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct CqlCfg {
-    /// Contact points (== `--cassandra-hosts`).
     pub hosts: Vec<String>,
-    /// Native transport port.
     pub port: u16,
-    /// Keyspace (== `--cassandra-keyspace`).
     pub keyspace: String,
-    /// Table (== `--cassandra-table`); columns `id, id_type, version, state`.
+    /// Columns `id, id_type, version, state`.
     pub table: String,
-    /// Optional auth username.
     pub username: Option<String>,
-    /// Optional auth password (masked — never logged/debugged in clear).
+    /// Masked — never logged/debugged in clear.
     pub password: Option<Secret<String>>,
-    /// Rewrite discovered peer addresses — for nodes behind a port-forward/NAT that
-    /// advertise an unreachable IP (e.g. `"10.89.0.10:9042" = "127.0.0.1:9042"`).
+    /// Rewrite advertised peer addresses (NAT/port-forward).
     pub address_translation: HashMap<String, String>,
 }
 
-/// `RocksDB` local cache settings.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RocksCfg {
-    /// On-disk path (== `--rocksdb-path`).
     pub path: String,
-    /// Optional TTL for column families, seconds (`0` = no TTL).
+    /// Column-family TTL, seconds (`0` = none).
     pub ttl_secs: u64,
 }
 
-/// State-machine config (the generic `stitcher` binary's compiled schema).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct StateCfg {
-    /// Path to the `state.yaml` schema (aggregate/key/filter/fields).
     pub config_file: PathBuf,
 }
 
-/// Output-transformer config (the generic binary's `transformer.toml`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct TransformCfg {
-    /// Path to `transformer.toml`; absent ⇒ passthrough (the processor's `encode`).
+    /// Path to `transformer.toml`; absent ⇒ passthrough `encode`.
     pub config_file: Option<PathBuf>,
 }
 
-/// Enrichment join-map reload (== `--config-file` / `--sleep-in-sec`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Enrichment {
-    /// JSON join-map file.
     pub config_file: String,
-    /// Background reload interval.
     pub reload_secs: u64,
 }
 
-/// Inspect mode: dev/staging introspection. `--inspect` is a shorthand for
-/// `print_incoming = print_state = print_outgoing = dry_run = true`.
+/// `--inspect` is a shorthand for the first four.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DebugCfg {
-    /// Log each consumed record: topic/partition/offset/key + redacted value.
     pub print_incoming: bool,
-    /// Log old→merged state per key after the fold.
     pub print_state: bool,
-    /// Log each outgoing sink record (topic/key + redacted payload), pre-retention.
     pub print_outgoing: bool,
-    /// Consume + decode + merge + print, but DON'T persist/produce/commit.
     pub dry_run: bool,
-    /// Rendering: `pretty` (indented JSON) or `compact`.
     pub format: InspectFormat,
-    /// Fraction of records/states to print, `0.0..=1.0` (flood control).
+    /// Fraction to print, `0.0..=1.0`.
     pub sample: f64,
-    /// Print only records/states whose key contains this substring ("" = all).
+    /// Print only keys containing this substring ("" = all).
     pub only_key_substr: String,
     /// Mask PII fields before printing (payments data!).
     pub redact: bool,
-    /// Field names masked (recursively) when `redact` is on.
     pub redact_fields: Vec<String>,
 }
 
-/// Inspect output rendering.
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum InspectFormat {
-    /// Indented JSON.
     #[default]
     Pretty,
-    /// Single-line JSON.
     Compact,
 }
 
@@ -327,7 +262,7 @@ impl Default for DebugCfg {
 }
 
 impl DebugCfg {
-    /// True when any inspect tap is enabled (raises the `stitcher::inspect` directive).
+    /// Raises the `stitcher::inspect` log directive.
     #[must_use]
     pub fn any_print(&self) -> bool {
         self.print_incoming || self.print_state || self.print_outgoing
@@ -440,13 +375,11 @@ impl Default for Enrichment {
 }
 
 impl Settings {
-    /// Structural validation after layering; messages are specific and actionable.
     pub fn validate(&self) -> StitcherResult<()> {
-        // single-variant enum; this binding breaks the build if a backend is added
+        // breaks the build if a backend is added
         let Backend::Cql = self.store.backend;
 
-        // first failing check wins; an empty admin_api_key is rejected so an empty
-        // `api-key` header can never pass
+        // first failing check wins
         let checks = [
             (
                 self.source_kafka.brokers.is_empty(),
@@ -500,13 +433,11 @@ impl Settings {
     }
 }
 
-/// Parse the command line (subcommand + global flags). The binary dispatches on the result.
 #[must_use]
 pub fn parse_cli() -> Cli {
     Cli::parse()
 }
 
-/// Testable core of the settings load that follows [`parse_cli`].
 pub fn load_with(
     override_path: Option<&std::path::Path>,
     inspect: bool,

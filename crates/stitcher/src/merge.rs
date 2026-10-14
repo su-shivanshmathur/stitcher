@@ -1,5 +1,5 @@
-//! Mergeable state primitives and [`MergeValue`], the dynamic schema-agnostic tree the
-//! config-driven interpreter runs on. `old.merge(new)` throughout: `self` is the older value.
+//! Mergeable state primitives + [`MergeValue`], the dynamic tree the config interpreter
+//! runs on. `self` is the older value throughout.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -9,21 +9,17 @@ use std::{
 use serde::{ser::SerializeMap, Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
-/// Associative merge of two states; `self` is the older value, `newer` the incoming one
-/// (associativity; right identity with `Default`).
+/// Associative merge; `self` is the older value.
 pub trait Merge {
-    /// Merge `self` (old) with `newer` (incoming), returning the merged state.
     #[must_use]
     fn merge(self, newer: Self) -> Self;
 }
 
-/// Keep the value with the strictly larger comparator; a **tie keeps the newer** value.
-/// Serialized as `{"comparator": …, "payload": …}` to byte-match stored v3 state.
+/// Larger comparator wins; a tie keeps the newer. Serialized `{"comparator": …, "payload": …}`
+/// to byte-match stored v3 state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatestBy<C: Ord, A> {
-    /// Merge key; larger wins (ties keep the newer value).
     pub comparator: C,
-    /// Carried data.
     pub payload: A,
 }
 
@@ -47,15 +43,14 @@ impl<C: Ord + Default, A: Default> Default for LatestBy<C, A> {
 }
 
 impl<C: Ord + Default + PartialEq, A: Default + PartialEq> LatestBy<C, A> {
-    /// True when this equals the identity value (used for `omitNothingFields`-style serde).
+    /// Identity value (omitted from serialized state).
     #[must_use]
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
 }
 
-/// Union of two maps, merging values on key collision. Deletion/eviction is NOT part of
-/// the port (maps only grow).
+/// Union of two maps, merging values on key collision; maps only grow.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KeyedMap<K: Eq + Hash, V>(pub HashMap<K, V>);
@@ -63,7 +58,7 @@ pub struct KeyedMap<K: Eq + Hash, V>(pub HashMap<K, V>);
 impl<K: Eq + Hash, V: Merge> Merge for KeyedMap<K, V> {
     fn merge(mut self, newer: Self) -> Self {
         for (entry_key, entry_value) in newer.0 {
-            // Reuse the LHS allocation: remove + insert instead of building a fresh map.
+            // reuse the LHS allocation via remove + insert
             let combined = match self.0.remove(&entry_key) {
                 Some(old) => old.merge(entry_value),
                 None => entry_value,
@@ -75,14 +70,13 @@ impl<K: Eq + Hash, V: Merge> Merge for KeyedMap<K, V> {
 }
 
 impl<K: Eq + Hash, V> KeyedMap<K, V> {
-    /// True when the map is empty (used for `omitNothingFields`-style serde).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 }
 
-/// Keep the rightmost `Some` (== `Data.Monoid.Last`). Serialized transparently.
+/// Last-write-wins.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LastWrite<T>(pub Option<T>);
@@ -94,35 +88,31 @@ impl<T> Merge for LastWrite<T> {
 }
 
 impl<T> LastWrite<T> {
-    /// True when `None` (used for `omitNothingFields`-style serde).
     #[must_use]
     pub fn is_none(&self) -> bool {
         self.0.is_none()
     }
 }
 
-/// Keep the **leftmost** (first-written) `Some` — a write-once / sticky field. Because the
-/// pipeline persists before committing offsets, the first assignment is stable across
-/// restarts and replay. Serialized transparently.
+/// Write-once: first `Some` wins — persist-before-commit makes it stable across replay.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FirstWrite<T>(pub Option<T>);
 
 impl<T> Merge for FirstWrite<T> {
     fn merge(self, newer: Self) -> Self {
-        Self(self.0.or(newer.0)) // keep the older value if present (first-write wins)
+        Self(self.0.or(newer.0)) // first-write wins
     }
 }
 
 impl<T> FirstWrite<T> {
-    /// True when unset (used for `omitNothingFields`-style serde).
     #[must_use]
     pub fn is_none(&self) -> bool {
         self.0.is_none()
     }
 }
 
-/// Sum two counts (== `Data.Monoid.Sum Int`). Serialized transparently.
+/// Sum.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Counter(pub i64);
@@ -134,7 +124,6 @@ impl Merge for Counter {
 }
 
 impl Counter {
-    /// True when zero (used for `omitNothingFields`-style serde).
     #[must_use]
     pub fn is_zero(&self) -> bool {
         self.0 == 0
@@ -150,35 +139,27 @@ impl<T: Merge> Merge for Option<T> {
     }
 }
 
-/// Dynamic state tree, one variant per schema node kind, mirroring the typed primitives.
-/// Mismatched variants on merge (schema drift between stored and live config) keep the newer.
+/// Dynamic state tree; mismatched variants on merge (schema drift) keep the newer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum MergeValue {
-    /// The identity (a `last` node's absent value, or no state).
+    /// The merge identity.
     #[default]
     Null,
-    /// `latest_by` node.
     LatestBy {
-        /// Merge key; larger wins (ties keep the newer value).
         comparator: i64,
-        /// Carried data.
         payload: Value,
     },
-    /// `keyed_map` / object node (`BTreeMap` for deterministic serialization order).
+    /// `BTreeMap` for deterministic serialization order.
     Map(BTreeMap<String, Self>),
-    /// `last` node's present value (last-write-wins).
+    /// Last-write-wins.
     Leaf(Value),
-    /// `once` node's present value: first-write wins — the merge direction is what
-    /// distinguishes it from [`MergeValue::Leaf`].
+    /// First-write wins (merge direction distinguishes it from [`MergeValue::Leaf`]).
     Once(Value),
-    /// `counter` node (== [`Counter`]).
     Counter(i64),
 }
 
 impl MergeValue {
-    /// True when this is the merge identity for its node kind (a field carrying only
-    /// this is omitted from the serialized state, matching the typed processors'
-    /// `skip_serializing_if` attributes).
+    /// Identity ⇒ omitted from the serialized state.
     #[must_use]
     pub fn is_identity(&self) -> bool {
         match self {
@@ -244,9 +225,8 @@ impl Merge for MergeValue {
 }
 
 impl Serialize for MergeValue {
-    /// Canonical form: identity entries are omitted at every map level (absent on the wire
-    /// ⇔ identity on decode, so the round trip is stable), `LatestBy` renders
-    /// `{"comparator": …, "payload": …}`, and an empty state renders `{}`.
+    /// Identity entries omitted at every map level (round-trip stable); `LatestBy` renders
+    /// `{"comparator": …, "payload": …}`; an empty state renders `{}`.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Null => {

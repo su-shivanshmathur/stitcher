@@ -1,8 +1,5 @@
-//! Ops HTTP server: `GET /metrics`, `GET /health`, `GET /state`.
-//!
-//! Runs on a dedicated OS thread with its own `actix_web::rt::System` (`HttpServer` is
-//! `!Send`); `/state` reuses the pipeline's shared [`Store`] connection. `/state` returns
-//! raw session data (PII); keep the ops port cluster-internal.
+//! Ops HTTP: `/metrics`, `/health`, `/state` (PII — keep the port cluster-internal).
+//! Dedicated thread — `HttpServer` is `!Send`.
 
 use std::sync::Arc;
 
@@ -11,21 +8,16 @@ use prometheus::Encoder;
 use crate::errors::{StitcherError, StitcherResult};
 use crate::store::Store;
 
-/// Shared handles injected into every request.
 #[derive(Clone)]
 struct AppState {
     store: Arc<dyn Store>,
-    /// The single id_type this process serves. The store's local cache is keyed to it, so
-    /// `/state` must reject any other id_type — a cache hit could return wrong-type state.
+    /// Sole id_type served; the local cache is keyed to it — reject all others.
     id_type: Arc<str>,
-    /// Admin API key required in the `api-key` header to read `/state` (raw PII). `None`
-    /// ⇒ every `/state` request is rejected (401) — the endpoint is closed by default.
+    /// `api-key` header for `/state`; unset ⇒ always 401.
     admin_api_key: Option<Arc<str>>,
 }
 
-/// Spawn the actix-web ops server on a dedicated OS thread, reusing `store` for `/state`.
-/// `id_type` rejects cross-type `/state` queries; `admin_api_key` (when set) is required in
-/// the `api-key` header. The pre-bound `TcpListener` surfaces bind errors before the spawn.
+/// Pre-bound listener surfaces bind errors before the thread is spawned.
 pub fn spawn(
     host: &str,
     port: u16,
@@ -58,9 +50,7 @@ pub fn spawn(
                         .route("/health", actix_web::web::get().to(health))
                         .route("/state", actix_web::web::get().to(state_handler))
                 })
-                // The pipeline is the sole shutdown authority (it drains the in-flight
-                // batch on SIGTERM). Without this, actix installs its own signal handler
-                // and /health + /metrics go dark mid-drain, tripping k8s probes.
+                // actix would install its own signal handler and kill /health mid-drain
                 .disable_signals()
                 .workers(1)
                 .listen(listener);
@@ -80,9 +70,7 @@ pub fn spawn(
     Ok(())
 }
 
-/// Constant-time byte comparison (XOR-accumulated, no short-circuit; the loop always runs
-/// the configured key's length and a length mismatch is folded in up front), so the
-/// running time reveals nothing about the request key.
+/// Constant-time compare — no short-circuit, length folded in.
 fn secret_eq(provided: &[u8], configured: &[u8]) -> bool {
     let mut diff = u8::from(provided.len() != configured.len());
     for (i, c) in configured.iter().enumerate() {
@@ -117,14 +105,12 @@ fn gather_metrics() -> Result<String, String> {
 // GET /state?id_type=<>&id=<>
 // ---------------------------------------------------------------------------
 
-/// Query parameters for `GET /state`.
 #[derive(serde::Deserialize)]
 struct StateParams {
     id_type: String,
     id: String,
 }
 
-/// Response body for a found session state.
 #[derive(serde::Serialize)]
 struct StateFound {
     id_type: String,
@@ -133,14 +119,12 @@ struct StateFound {
     state: serde_json::Value,
 }
 
-/// Response body for error cases.
 #[derive(serde::Serialize)]
 struct ErrorBody {
     error: String,
 }
 
-/// True when the request carries an `api-key` header matching the configured admin key.
-/// `None` configured ⇒ closed. Compared as raw bytes, so a non-ASCII key still matches.
+/// `api-key` header matches the configured key (raw bytes); unset ⇒ closed.
 fn authorized(req: &actix_web::HttpRequest, state: &AppState) -> bool {
     state.admin_api_key.as_ref().is_some_and(|key| {
         req.headers()
@@ -149,16 +133,14 @@ fn authorized(req: &actix_web::HttpRequest, state: &AppState) -> bool {
     })
 }
 
-/// `GET /state`. Auth runs before the query is inspected, so an unauthenticated malformed
-/// request still gets 401 — hence the `Result<Query<_>>` (a bare extractor would 400
-/// ahead of the auth check).
+/// `Result<Query<_>>` so auth runs before parse errors (401 beats 400).
 async fn state_handler(
     req: actix_web::HttpRequest,
     payload: Result<actix_web::web::Query<StateParams>, actix_web::Error>,
     state: actix_web::web::Data<AppState>,
 ) -> actix_web::HttpResponse {
     let mut response = if !authorized(&req, &state) {
-        // Uniform 401 whether the key is unset or wrong; the startup log flags unset.
+        // Uniform 401 whether unset or wrong.
         actix_web::HttpResponse::Unauthorized().json(ErrorBody {
             error: "unauthorized: a valid api-key header is required".to_string(),
         })
@@ -170,8 +152,7 @@ async fn state_handler(
             Ok(payload) => query_state(payload.into_inner(), &state).await,
         }
     };
-    // `/state` carries PII behind a custom header (shared caches don't apply their
-    // `Authorization` safeguards), so force `no-store` on every response.
+    // custom-header auth gets no cache safeguards — force `no-store`
     response.headers_mut().insert(
         actix_web::http::header::CACHE_CONTROL,
         actix_web::http::header::HeaderValue::from_static("no-store"),
@@ -179,15 +160,13 @@ async fn state_handler(
     response
 }
 
-/// Validate a parsed request and read its state from the shared store.
 async fn query_state(params: StateParams, state: &AppState) -> actix_web::HttpResponse {
     if params.id_type.is_empty() || params.id.is_empty() {
         actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: "id_type and id must not be empty".to_string(),
         })
     } else if *params.id_type != *state.id_type {
-        // The local cache is keyed to this process's id_type and ignores the argument,
-        // so another type could yield a wrong-type cache hit — reject it.
+        // a wrong-type query could hit the cache — reject
         actix_web::HttpResponse::BadRequest().json(ErrorBody {
             error: format!(
                 "this instance serves id_type={}; query for id_type={} not allowed",
@@ -199,8 +178,7 @@ async fn query_state(params: StateParams, state: &AppState) -> actix_web::HttpRe
     }
 }
 
-/// Read one `(id_type, id)` from the shared store (local cache first, remote on a miss);
-/// validation is the caller's job.
+/// Local cache first, remote on a miss; caller validates.
 async fn fetch_state(params: &StateParams, state: &AppState) -> actix_web::HttpResponse {
     let key: crate::processor::Key = params.id.clone();
     match state

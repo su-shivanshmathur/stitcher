@@ -2,30 +2,26 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-// Entry rule: the expression must consume the whole input — without the EOI anchor,
-// pest returns a prefix match (a path like `log_type` would truncate at `log`).
+// Without the EOI anchor pest returns a prefix match (`log_type` would truncate at `log`).
 file    = { SOI ~ or ~ EOI }
 
-// Precedence, loosest to tightest: `||` < `&&` < comparison. `||`/`&&` are
-// left-associative folds; comparison is NON-associative (at most one `cmp_op`
-// per level, so `a == b == c` is a parse error). Only `cmp_op` is a named rule.
+// Precedence: `||` < `&&` < comparison. `||`/`&&` are left-associative folds; comparison
+// is NON-associative (≤ 1 `cmp_op`, so `a == b == c` is a parse error).
 or      = { and ~ ("||" ~ and)* }
 and     = { cmp ~ ("&&" ~ cmp)* }
 cmp     = { term ~ (cmp_op ~ term)? }
 term    = { literal | call | path | root | unary | "(" ~ or ~ ")" }
 unary   = { "!" ~ term }
 call    = { ident ~ "(" ~ (or ~ ("," ~ or)*)? ~ ")" }
-// Identifier-rooted path (envelope fields sit next to `log`, so paths are not
-// `log`-prefixed only). Atomic so no whitespace sneaks into the matched span.
+// Identifier-rooted path; atomic so no whitespace sneaks into the matched span.
 path    = @{ ident ~ ("." ~ ident)* }
-// `$` = the whole record (the event as sent), for flat schemas with no envelope.
+// `$` = the whole record (the event as sent).
 root    = @{ "$" }
 literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
-// Keyword literals carry a negative lookahead: `literal` is tried before `path` in
-// `term` and PEG commits on the first match — without it, a field like `nullable`
-// would match the `null` prefix and strand the rest of the input at EOI.
+// Keyword literals carry a negative lookahead: without it PEG commits on the `null`
+// prefix of a field like `nullable` and strands the rest of the input at EOI.
 bool    = @{ ("true" | "false") ~ !ident_char }
 null    = @{ "null" ~ !ident_char }
 // One character that can continue an identifier.

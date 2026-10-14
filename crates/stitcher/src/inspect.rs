@@ -1,6 +1,4 @@
-//! Inspect mode: structured `stitcher::inspect` tracing events for incoming records,
-//! old→merged states, and outgoing sink records. PII-redacting by default, sampleable/
-//! key-filtered, and non-destructive under dry-run (nothing written or committed).
+//! Structured `stitcher::inspect` events; PII-redacting by default, dry-run writes nothing.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -8,13 +6,10 @@ use serde_json::Value;
 use crate::config::{DebugCfg, InspectFormat};
 use crate::processor::OutMsg;
 
-/// The string printed in place of redacted fields.
 const MASK: &str = "***";
 
-/// The `tracing` target all inspect events are emitted under.
 pub const TARGET: &str = "stitcher::inspect";
 
-/// Resolved inspect configuration (cheap checks on the hot path).
 #[derive(Debug, Clone)]
 pub struct Inspect {
     print_incoming: bool,
@@ -28,7 +23,6 @@ pub struct Inspect {
 }
 
 impl Inspect {
-    /// Resolve from the `[debug]` config section.
     #[must_use]
     pub fn from_cfg(cfg: &DebugCfg) -> Self {
         Self {
@@ -43,13 +37,12 @@ impl Inspect {
         }
     }
 
-    /// True when any printing is enabled (used to raise the log directive).
     #[must_use]
     pub fn any_printing(&self) -> bool {
         self.print_incoming || self.print_state || self.print_outgoing
     }
 
-    /// Sampling gate: `sample >= 1.0` keeps everything, `<= 0.0` nothing.
+    /// `>=1.0` keeps all, `<=0.0` none.
     fn sample_ok(&self) -> bool {
         if self.sample >= 1.0 {
             return true;
@@ -60,8 +53,7 @@ impl Inspect {
         rand_unit() < self.sample
     }
 
-    /// Key filter: `only_key_substr` empty ⇒ all keys pass; `None` (undecodable key)
-    /// passes only when unfiltered.
+    /// Empty substr ⇒ all; undecodable keys pass only unfiltered.
     fn key_ok(&self, key: Option<&str>) -> bool {
         if self.only_key_substr.is_empty() {
             return true;
@@ -72,14 +64,11 @@ impl Inspect {
         }
     }
 
-    /// True when state printing is on for this key.
     #[must_use]
     pub fn state_enabled_for(&self, key: &str) -> bool {
         self.print_state && self.key_ok(Some(key))
     }
 
-    /// Emit one incoming record (topic/partition/offset/key + rendered value).
-    /// Applies sampling + key filtering internally; no-op when disabled.
     pub fn incoming(
         &self,
         topic: &str,
@@ -102,8 +91,7 @@ impl Inspect {
         );
     }
 
-    /// Render a state (`Serialize`) through redaction + pretty/compact formatting.
-    /// Called by the pipeline **before** `Merge` consumes the old value.
+    /// Called before `Merge` consumes the old value.
     #[must_use]
     pub fn render_state<S: Serialize>(&self, state: &S) -> String {
         match serde_json::to_value(state) {
@@ -112,7 +100,6 @@ impl Inspect {
         }
     }
 
-    /// Emit the old→merged pair for one key (`old`/`merged` are pre-rendered strings).
     pub fn emit_state(&self, key: &str, version: i64, old: &str, merged: &str) {
         tracing::debug!(
             target: TARGET,
@@ -124,8 +111,7 @@ impl Inspect {
         );
     }
 
-    /// Emit the outgoing sink records for a batch (topic/key + rendered payload),
-    /// before retention filtering — i.e., everything the processor produced.
+    /// Pre-retention: everything the processor produced.
     pub fn outgoing(&self, msgs: &[OutMsg]) {
         if !self.print_outgoing {
             return;
@@ -144,8 +130,7 @@ impl Inspect {
         }
     }
 
-    /// Render a raw record payload: parse → redact → pretty/compact. Unparseable
-    /// payloads are summarized (never printed raw — they may still carry PII).
+    /// Unparseable payloads summarized, never printed raw (PII).
     fn render_bytes(&self, payload: &[u8]) -> String {
         match serde_json::from_slice::<Value>(payload) {
             Ok(v) => self.render_value(v),
@@ -153,7 +138,6 @@ impl Inspect {
         }
     }
 
-    /// Redact + format one JSON value.
     fn render_value(&self, mut v: Value) -> String {
         if self.redact {
             redact_value(&mut v, &self.redact_fields);
@@ -187,8 +171,8 @@ fn redact_value(value: &mut Value, fields: &[String]) {
     }
 }
 
-/// Uniform `f64` in `[0, 1)`: 52 hash bits of a per-call `RandomState` hasher mapped onto
-/// the floats of `[1, 2)` minus 1 (no `as`-cast, no thread-local state).
+/// Uniform `f64` in `[0, 1)`: 52 hash bits of a per-call `RandomState` mapped onto the
+/// floats of `[1, 2)` minus 1.
 fn rand_unit() -> f64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
