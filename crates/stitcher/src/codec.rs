@@ -1,5 +1,5 @@
-//! State framing codec (PLAN §13): `RocksDB` value = `u64 LE version ++ json`;
-//! Cassandra keeps `version` as its own column + plain JSON.
+//! State framing codec: `RocksDB` value = `u64 LE version ++ json`; Cassandra keeps
+//! `version` as its own column + plain JSON.
 
 /// Frame a stored state for `RocksDB`: 8-byte LE version header followed by the JSON blob.
 #[must_use]

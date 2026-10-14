@@ -33,10 +33,9 @@ pub struct RebalanceGuard {
 }
 
 impl RebalanceGuard {
-    /// Mark a batch as in-flight; the returned token decrements on **drop**, so every
-    /// exit path (early `?`, shutdown timeout, aborted future) releases the rebalance
-    /// drain. `None` while a revoke drain is pending — caller must not start new work
-    /// in that window.
+    /// Mark a batch as in-flight; the token decrements on **drop**, so every exit path
+    /// (early `?`, timeout, aborted future) releases the rebalance drain. `None` while a
+    /// revoke drain is pending — start no new work in that window.
     #[must_use]
     pub fn begin_batch(&self) -> Option<BatchToken<'_>> {
         if self.drained_flag.load(Ordering::SeqCst) {
@@ -58,10 +57,9 @@ impl RebalanceGuard {
     }
 }
 
-/// RAII in-flight token returned by [`RebalanceGuard::begin_batch`]. Holding it for
-/// the whole batch body makes the count abort-safe: an early return or a dropped
-/// future cannot strand `in_flight > 0` and hang the rebalance drain (600 s) on
-/// shutdown.
+/// RAII in-flight token returned by [`RebalanceGuard::begin_batch`]. Holding it for the
+/// whole batch makes the count abort-safe: an early return or dropped future cannot
+/// strand `in_flight > 0` and hang the rebalance drain on shutdown.
 #[must_use]
 pub struct BatchToken<'a>(&'a RebalanceGuard);
 
@@ -194,12 +192,11 @@ impl KafkaConsumer {
         self.guard.clone()
     }
 
-    /// Explicit commit of a processed batch's watermarks (see
-    /// [`batch_watermarks`]). `enable.auto.offset.store=false` means no offsets
-    /// are ever stored implicitly — committing "current positions" is a silent
-    /// no-op — so the offsets come from what the batch actually finished.
-    /// Async: the broker's ack (or rejection) is logged by
-    /// [`StitcherCtx::commit_callback`]. Retry ×3 covers queue-side failures.
+    /// Explicit commit of a processed batch's watermarks (see [`batch_watermarks`]).
+    /// `enable.auto.offset.store=false` means "commit current positions" would be a
+    /// silent no-op — the offsets come from what the batch actually finished. Async:
+    /// the broker's ack lands in [`StitcherCtx::commit_callback`]. Retry ×3 covers
+    /// queue-side failures.
     pub async fn commit(&self, watermarks: &[PartitionWatermark]) -> StitcherResult<()> {
         if watermarks.is_empty() {
             return Ok(()); // nothing processed in this batch
@@ -239,9 +236,8 @@ impl KafkaConsumer {
 pub type PartitionWatermark = (String, i32, i64);
 
 /// Per-partition commit watermark for a consumed batch: max offset + 1 per
-/// (topic, partition) — exactly the range the batch finished, independent of
-/// anything else the consumer may have fetched past it. Error records carry no
-/// offset and don't advance the watermark (they replay). Sorted for
+/// (topic, partition) — exactly the range the batch finished. Error records carry
+/// no offset and don't advance the watermark (they replay). Sorted for
 /// deterministic logs/commits.
 #[must_use]
 pub fn batch_watermarks(
@@ -274,8 +270,8 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     };
 
     let mut conf = ClientConfig::new();
-    // Dry-run (inspect tap, INSPECT.md): a fresh random group per run so the tap never
-    // disturbs the real pipeline's offsets and can be freely re-run.
+    // Dry-run (inspect tap): a fresh random group per run so the tap never disturbs
+    // the real pipeline's offsets and can be freely re-run.
     let group_id = if cfg.debug.dry_run {
         format!(
             "{}-inspect-{}",
@@ -287,12 +283,10 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     };
     conf.set("bootstrap.servers", cfg.source_kafka.brokers.join(","))
         .set("group.id", &group_id)
-        // load-bearing for the at-least-once protocol — architectural, not
-        // deployment knobs: commits are explicit per-batch watermarks after
-        // persist (never auto), offsets are never stored implicitly (the
-        // watermark comes from the processed batch), and partition-EOF events
-        // would inject errors into the batch stream. `extra` remains the
-        // escape hatch for exotic setups.
+        // load-bearing for the at-least-once protocol: commits are explicit per-batch
+        // watermarks after persist (never auto), offsets are never stored implicitly,
+        // and partition-EOF events would inject errors into the batch stream. `extra`
+        // remains the escape hatch for exotic setups.
         .set("enable.auto.commit", "false")
         .set("enable.partition.eof", "false")
         .set("enable.auto.offset.store", "false")
@@ -320,7 +314,7 @@ pub fn build(cfg: &config::Settings, store: Arc<dyn Store>) -> StitcherResult<Ka
     Ok(KafkaConsumer { consumer, guard })
 }
 
-/// One owned message: payload copied across the await boundary (PLAN §The crux).
+/// One owned message: payload copied across the await boundary.
 #[derive(Clone, Debug)]
 pub struct OwnedRecord {
     /// Source topic.

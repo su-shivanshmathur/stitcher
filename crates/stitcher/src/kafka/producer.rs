@@ -89,8 +89,8 @@ impl KafkaProducer {
         Ok(())
     }
 
-    /// Route a malformed record to the DLQ with provenance headers (never logs the
-    /// payload; the payload itself rides on the DLQ record).
+    /// Route a malformed record to the DLQ with provenance headers (payload rides on the
+    /// record; it is never logged).
     pub async fn send_dlq(
         &self,
         source_topic: &str,

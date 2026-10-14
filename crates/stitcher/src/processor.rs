@@ -36,9 +36,9 @@ impl Sign {
     }
 }
 
-/// The source record that caused a delta: the greatest `(topic, partition, offset)` coordinate (by
-/// that total order) feeding the key's state in the batch. The full coordinate — not a bare offset —
-/// is globally unique even if a key's records span partitions/topics (offsets are per-partition).
+/// The source record that caused a delta: the greatest `(topic, partition, offset)` coordinate
+/// feeding the key's state in the batch — globally unique even across partitions/topics,
+/// because offsets are only per-partition unique.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Causation {
     pub topic: String,
@@ -46,28 +46,22 @@ pub struct Causation {
     pub offset: i64,
 }
 
-/// One outbound Kafka record + a delivery envelope (emitted as Kafka headers) for downstream
+/// One outbound Kafka record + a delivery envelope (Kafka headers) for downstream
 /// dedup/correlation of the ±1 deltas.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: stable hash of `(stream, topic, aggregate_key, causation(topic/partition/offset),
-    /// row_id, payload content, sign)`. Content (the exact serialized payload bytes) is hashed on
-    /// TOP of the causation coordinate — which stays the identity anchor: genuine re-emits of a
-    /// recurring state value keep distinct ids (different source records ⇒ different causation),
-    /// while a regrouped replay that folds a different record subset into the same max coordinate
-    /// can no longer reuse one id for two distinct events. The stable aggregate key (not the
-    /// mutable projected key) anchors identity; `stream` + `row_id` keep same-topic streams and
-    /// explode rows distinct. Stable across a same-batch replay.
+    /// Dedup id: FNV-1a-128 of `(stream, topic, aggregate_key, causation, row_id, payload
+    /// content, sign)`. Content is hashed ON TOP of the causation coordinate: genuine re-emits
+    /// keep distinct ids (different source records), while a same-batch replay reuses one id.
+    /// The stable aggregate key (not the mutable projected key) anchors identity.
     pub event_id: String,
     /// Shared by the retract and emit of one row: the same parts minus `sign`, hashing the
-    /// transition's surviving content (the `+1` payload; the `−1` payload for a gate-close
-    /// retract). A `-1`/`+1` pair with one `correlation_id` is ATOMIC downstream — if the `+1`
-    /// is dropped by `event_id` dedup (a same-batch replay), the `-1` MUST be dropped too, or a
-    /// first-batch replay strands an orphan retract (at-least-once; see FINDINGS #3 — whose
-    /// unchanged-row case is additionally silenced upstream by the engine's no-op skip).
+    /// transition's surviving content. A `-1`/`+1` pair with one `correlation_id` is ATOMIC
+    /// downstream — if the `+1` is dropped by dedup, the `-1` must be dropped too, or a
+    /// replay strands an orphan retract (at-least-once).
     pub correlation_id: String,
     /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,

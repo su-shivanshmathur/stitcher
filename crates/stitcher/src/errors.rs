@@ -1,4 +1,4 @@
-//! Error types for the whole framework (PLAN §17: `thiserror` + `error-stack`, NOT anyhow).
+//! Error types for the whole framework (`thiserror` + `error-stack`).
 
 /// Top-level error categories. Call sites wrap these in an [`error_stack::Report`] via
 /// `.change_context(...)` and attach printable context with `.attach_printable_lazy(...)`.

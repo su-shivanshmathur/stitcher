@@ -1,7 +1,6 @@
-//! The transform engine: one merged state `Value` (+ its `sign`) → `Vec<OutMsg>` across the
-//! configured streams. Each stream: gate-diff the old/new states (a flip emits only the side
-//! that changed) → project fields (optionally `explode`ing a map into per-entry rows merged
-//! with `common` fields) → stamp `sign_flag` → retention-filter.
+//! The transform engine: one merged state `Value` → `Vec<OutMsg>` across the configured
+//! streams — gate-diff old/new, project (optionally exploding a map into per-entry rows),
+//! stamp `sign_flag`, retention-filter.
 
 use std::{borrow::Cow, collections::HashMap};
 
@@ -64,16 +63,11 @@ impl Projection for Transform {
 }
 
 impl CompiledStream {
-    /// Render one transition as the old/new gate row-set difference — never an orphan `-1`
-    /// (a never-emitted row) nor a stranded `+1` (an emitted row gated out):
-    ///
-    /// - open→open: ±1 pair per matched row; closed→open: only `+1`s;
-    ///   open→closed: only `-1`s; closed→closed: nothing.
-    ///
-    /// Retention gates a pair on the NEW payload, a close-retract on the OLD payload. That is
-    /// orphan-free because retention keys are creation-time-immutable (`RetentionDoc`):
-    /// fresh-now ⇒ fresh-at-emit, so a close-retract only targets rows that actually shipped.
-    /// Don't gate close-retracts differently — that reintroduces orphan `-1`s.
+    /// Old/new gate row-set difference — never an orphan `-1` (never-emitted row) nor a
+    /// stranded `+1` (emitted row gated out): open→open pairs per row, closed→open only
+    /// `+1`s, open→closed only `-1`s. Retention gates a pair on the NEW payload and a
+    /// close-retract on the OLD — orphan-free because retention keys are creation-time
+    /// immutable (fresh-now ⇒ fresh-at-emit).
     fn render_transition(
         &self,
         old: Option<&Value>,
@@ -95,8 +89,6 @@ impl CompiledStream {
         match (old_open, new_open) {
             (false, false) => Vec::new(),
             (_, true) => {
-                // Old rows retract only when the old gate was open; indexed once by row id
-                // (O(1) match, not a per-row scan).
                 let old_exploded = match (old_open, old) {
                     (true, Some(state)) => Some(self.eval_explode(state, ctx)),
                     _ => None, // old gate closed (or absent): nothing was emitted
@@ -134,8 +126,8 @@ impl CompiledStream {
         }
     }
 
-    /// Evaluate the stream's `explode` expression — borrows from `state` via `ctx`'s lifetime.
-    /// Returns `None` when not exploding; `Some(collection)` otherwise.
+    /// Evaluate the stream's `explode` expression (`None` when not exploding); borrows from
+    /// `state` — `ctx` must supply enrichment for at least as long.
     fn eval_explode<'s>(
         &self,
         state: &'s Value,
@@ -151,8 +143,8 @@ impl CompiledStream {
         })
     }
 
-    /// Rows of an evaluated explode collection (borrowed entries), or the single empty-id
-    /// sentinel row when not exploding. Row id = keyed_map key / array index (stable identity).
+    /// Rows of an explode collection (borrowed), or the empty-id sentinel row when not
+    /// exploding; row id = keyed_map key / array index (stable identity).
     fn rows_of(exploded: Option<&Value>) -> Vec<(String, &Value)> {
         match exploded {
             Some(collection) => explode_entries(collection),
@@ -160,10 +152,10 @@ impl CompiledStream {
         }
     }
 
-    /// One row's ±1 pair, gated by the NEW row's retention (both legs ship together or
-    /// neither). An UNCHANGED row (identical projected fields AND routing key) emits nothing:
-    /// a cancelling pair is silence, and it keeps a replayed first batch (`old == new`) from
-    /// pairing an unmatched `-1` with an already-deduped `+1` (FINDINGS #3).
+    /// One row's ±1 pair, retention-gated on the NEW payload (both legs ship together or
+    /// neither). An unchanged row (projected fields AND routing key) emits nothing: a
+    /// cancelling pair is silence, and it keeps a replayed first batch from pairing an
+    /// unmatched `-1` with an already-deduped `+1`.
     fn render_pair(
         &self,
         new: &Value,
@@ -182,18 +174,17 @@ impl CompiledStream {
                 .into_iter()
                 .collect();
         };
-        // Retract content is recomputed from stored state with the LIVE enrichment map — a
-        // reload between emit and retract can shift the −1's fields (known limit, FINDINGS #13).
+        // Retract content is recomputed with the LIVE enrichment map — a reload between emit
+        // and retract can shift the −1's fields (known limit).
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
-        // A key-only change is NOT a no-op: the row under the old key needs its −1 and the
-        // new key its +1 (the ids exclude the key, but the skip must not).
+        // A key-only change is NOT a no-op: the old key needs its −1, the new key its +1.
         if old_fields == new_fields && self.key_of(&old_scope) == self.key_of(&new_scope) {
             return Vec::new(); // unchanged row: a cancelling pair ≡ silence
         }
         let new_payload = self.stamp_sign(new_fields, Sign::Plus);
         if !self.passes_retention(&new_payload, ctx.now_secs) {
-            return Vec::new(); // retention suppresses the pair together
+            return Vec::new();
         }
         // serialize new_payload once; reuse bytes for both the emit id and the retract correlation
         let new_bytes = serialize(&new_payload);
@@ -213,8 +204,7 @@ impl CompiledStream {
         vec![retract, emit]
     }
 
-    /// A gate-close transition's lone retract (retention on the OLD payload — see
-    /// [`Self::render_transition`]).
+    /// A gate-close transition's lone retract (retention on the OLD payload).
     fn render_close(
         &self,
         ctx: &ProjectionContext<'_>,
@@ -227,7 +217,7 @@ impl CompiledStream {
         self.emit_if_retained(&old_payload, ctx, Sign::Minus, row_id, &old_scope)
     }
 
-    /// The retention-gated emit leg for `payload` (a lone `+1`, or the shared gate for a pair).
+    /// Retention-gated emit leg (a lone `+1`, or the shared gate for a pair).
     fn emit_if_retained(
         &self,
         payload: &Value,
@@ -257,14 +247,14 @@ impl CompiledStream {
         }
     }
 
-    /// A row's projected fields: `common` + `row` fields (nulls omitted). Sign is stamped
+    /// A row's projected fields: `common` + `row` (nulls omitted) — sign is stamped
     /// separately so skip-comparisons see content, not the ±1.
     fn project(&self, cx: &StateScope<'_>) -> serde_json::Map<String, Value> {
         let mut obj = serde_json::Map::new();
         for (name, source) in self.common.iter().chain(self.row.iter()) {
             let value = eval::eval(source, cx);
             if !value.is_null() {
-                obj.insert(name.clone(), value.into_owned()); // omit nulls (== omitNothingFields)
+                obj.insert(name.clone(), value.into_owned());
             }
         }
         obj
@@ -305,8 +295,8 @@ impl CompiledStream {
         ]
     }
 
-    /// Build one output record where this row self-correlates (all lone emits, close retracts,
-    /// and the `+1` leg of a pair). Payload bytes are moved in (no third buffer).
+    /// Build one output record that self-correlates (lone emits, close retracts, a pair's
+    /// `+1`); payload bytes moved in — hashed and shipped from one buffer.
     fn out_msg_self(
         &self,
         ctx: &ProjectionContext<'_>,
@@ -379,9 +369,8 @@ impl CompiledStream {
         }
     }
 
-    /// Keep a row unless its retention timestamp is older than the window. A missing
-    /// or unparseable timestamp is RETAINED (no silent loss), matching the pipeline's
-    /// [`filters::RetentionTable`].
+    /// Keep a row unless its retention timestamp is older than the window; a missing or
+    /// unparseable timestamp is RETAINED (no silent loss).
     fn passes_retention(&self, payload: &Value, now_secs: i64) -> bool {
         self.retention.as_ref().is_none_or(|retention| {
             json_util::get_path(payload, &retention.key)
@@ -391,8 +380,8 @@ impl CompiledStream {
     }
 }
 
-/// `explode` a keyed map into `(entry key, &entry)` rows or an array into `(index, &item)` rows
-/// (stable row ids; borrowed elements — no per-entry clones). Anything else ⇒ no rows.
+/// `explode` a keyed map into `(entry key, &entry)` rows or an array into `(index, &item)`
+/// rows; anything else ⇒ no rows.
 fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
     match collection {
         Value::Object(entries) => entries
@@ -404,14 +393,14 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
             .enumerate()
             .map(|(index, value)| (index.to_string(), value))
             .collect(),
-        // Null is the merge identity — an absent collection (before its first event) is
-        // expected, so debug, not warn (it recurs every transition per stream).
+        // Null = merge identity (an absent collection is expected, and it recurs every
+        // transition): debug, not warn.
         Value::Null => {
             tracing::debug!("explode: absent (null) collection; no rows emitted");
             Vec::new()
         }
-        // A non-null scalar where a keyed_map/array was expected is malformed stored state: the
-        // row(s) vanish with no -1/+1, so surface it (kind only; the value may be sensitive).
+        // A non-null scalar where a collection was expected is malformed stored state — the
+        // row(s) vanish with no ±1, so surface it (kind only; the value may be sensitive).
         Value::Bool(_) | Value::Number(_) | Value::String(_) => {
             let kind = match collection {
                 Value::Bool(_) => "bool",
@@ -427,11 +416,10 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
     }
 }
 
-/// Non-explode sentinel element — module-level so [`CompiledStream::rows_of`] can return a
-/// borrowed element.
+/// Non-explode sentinel element (module-level so [`CompiledStream::rows_of`] can borrow it).
 static NULL_ROW: Value = Value::Null;
 
-/// Serialize a payload once — the record bytes AND the id content hash (one source of truth).
+/// Serialize a payload once — the record bytes AND the id-hash input (one source of truth).
 /// Deterministic: `Map` is BTreeMap-backed (no `preserve_order`), so `to_vec` is key-sorted.
 fn serialize(payload: &Value) -> Vec<u8> {
     serde_json::to_vec(payload).unwrap_or_default()

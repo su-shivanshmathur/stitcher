@@ -1,6 +1,5 @@
 //! `transformer.toml` model + ahead-of-time compilation (parse every DSL string once at
-//! boot, fail fast). Versioned; a transform change is a deliberate config bump applied on
-//! restart (no hot-reload).
+//! boot, fail fast). Versioned; transform changes are deliberate config bumps on restart.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -12,13 +11,11 @@ use super::engine::{CompiledStream, Retention, Transform};
 use stitcher::errors::{StitcherError, StitcherResult};
 use stitcher::state::config::Program;
 
-/// Top-level `transformer.toml` document.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransformDoc {
-    /// Config version (audited; bumped on every transform-logic change).
+    /// Bumped on every transform-logic change (audited).
     version: i64,
-    /// Output streams (`[[stream]]`).
     #[serde(default)]
     stream: Vec<StreamDoc>,
 }
@@ -47,18 +44,12 @@ struct StreamDoc {
     key: Option<String>,
 }
 
-/// Per-stream retention config.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetentionDoc {
     days: i64,
-    /// Row timestamp field (epoch seconds) for the retention window. MUST be a creation-time
-    /// (immutable) field such as `created_at`: a row's −1 retract and +1 emit share this value, so
-    /// retention ships or suppresses the pair together. A mutable key could straddle the window and
-    /// strand a half-pair downstream. The same immutability is what makes a gate-close retract
-    /// safe to decide on the OLD payload's current freshness (fresh-now ⇒ fresh-at-emit, by
-    /// backwards monotonicity). Note: a row that ages out after being emitted is never retracted
-    /// (no lone −1) — it lingers, so accumulation-only consumers need their own window.
+    /// Row timestamp field (epoch seconds); must be creation-time-immutable (e.g. `created_at`)
+    /// so a row's −1/+1 pair always ships or is suppressed together.
     key: String,
 }
 
@@ -66,8 +57,8 @@ const fn default_true() -> bool {
     true
 }
 
-/// Load + compile a `transformer.toml`, cross-validated against the state schema `program` and the
-/// enrichment `tables` (`None` ⇒ no enrichment supplied, `lookup` table names are not checked).
+/// Load + compile `transformer.toml`, validated against the state schema and enrichment `tables`
+/// (`None` ⇒ no enrichment supplied; `lookup` table names not checked).
 pub fn load(
     path: &Path,
     program: &Program,
@@ -107,8 +98,7 @@ fn compile(
         .map(Transform::new)
 }
 
-/// Stream names must be non-empty and globally unique: each is folded into the delta envelope ids,
-/// so a duplicate would collide two streams' deltas on the same topic.
+/// Names fold into delta envelope ids, so duplicates would collide two streams' deltas.
 fn unique_stream_names(streams: &[StreamDoc]) -> Result<(), String> {
     let mut seen = std::collections::BTreeSet::new();
     streams
@@ -163,13 +153,10 @@ fn compile_stream(
     let err = move |m: String| format!("[stream {name}] {m}");
     let exploding = doc.explode.is_some();
 
-    // the row-field map depends on explode mode (see below); the reserved-name guard scans both it
-    // and `common`, since `sign_flag` is stamped onto every emitted row when sign_flag=true.
     let row_src = if exploding { &doc.element } else { &doc.fields };
     let sign_flag_collision = doc.sign_flag
         && (doc.common.contains_key("sign_flag") || row_src.contains_key("sign_flag"));
 
-    // structural checks, first failure wins
     let shape_error = [
         (
             StreamShapeError::FieldsWithExplode,
@@ -194,8 +181,6 @@ fn compile_stream(
     match shape_error {
         Some(error) => Err(err(error.message().to_string())),
         None => {
-            // non-explode: `fields` are the row; explode: `element` are the per-entry row
-            // (`row_src` is bound above, next to the reserved-name guard that also reads it).
             let compiled = CompiledStream {
                 name: doc.name,
                 topic: doc.topic,

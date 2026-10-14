@@ -1,5 +1,4 @@
-//! Runtime interpreter: a [`Processor`] driven by a compiled [`Program`], evaluating DSL
-//! expressions through the shared [`crate::eval`] walker.
+//! Runtime interpreter: a [`Processor`] driven by a compiled [`Program`].
 
 use std::{
     borrow::Cow,
@@ -16,9 +15,8 @@ use crate::merge::MergeValue;
 use crate::processor::{Key, Processor};
 use crate::state::config::{FieldProg, KeySeg, Program};
 
-/// Schema-driven `Processor` over [`MergeValue`] state: decode, merge and sink
-/// emission all run from the compiled [`Program`] (lantern #37) — the framework
-/// serves the full oracle requirement from config alone.
+/// Schema-driven `Processor` over [`MergeValue`] state: decode, merge and sink emission
+/// all run from the compiled [`Program`].
 pub struct ConfigProcessor {
     prog: Program,
     tenant_ids: HashSet<String>,
@@ -34,9 +32,8 @@ impl ConfigProcessor {
         }
     }
 
-    /// Admission filter (== `_decodeLog`): required non-empty paths, substring
-    /// rejection, `log_type` allow-list, tenant allow-list. Rejections log their
-    /// reason at `debug` (the why behind `messages_filtered("by_design")`).
+    /// Admission filter: required non-empty paths, substring rejection, `log_type` and
+    /// tenant allow-lists. Rejections log their reason at `debug`.
     fn admit(&self, record: &Value) -> Option<()> {
         let filter = &self.prog.filter;
         for alternative_paths in &filter.require {
@@ -93,8 +90,7 @@ impl ConfigProcessor {
         Some(())
     }
 
-    /// Key template instantiation; a hole with no present alternative drops
-    /// the record.
+    /// Key template instantiation; a hole with no present alternative drops the record.
     fn key_of(&self, record: &Value) -> Option<Key> {
         let mut key = String::new();
         for segment in &self.prog.key {
@@ -168,7 +164,7 @@ impl Processor for ConfigProcessor {
     }
 }
 
-/// Field node → its contribution for one record (mirror of `field_build`).
+/// Field node → its contribution for one record.
 fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
     match field {
         FieldProg::LatestBy {
@@ -252,9 +248,9 @@ fn build_latest_by(comparator: &Expr, payload: &Expr, record: &Value) -> MergeVa
     }
 }
 
-/// Stored JSON → field value, per the compiled node kind (schema-driven decode:
-/// `MergeValue`'s JSON shape is ambiguous without it). Strict like typed serde:
-/// malformed shapes ⇒ `None` (state treated absent), never a partial read.
+/// Stored JSON → field value, per the compiled node kind (`MergeValue`'s JSON shape is
+/// ambiguous without it). Strict: malformed shapes ⇒ `None` (state treated absent),
+/// never a partial read.
 fn decode_field(field: &FieldProg, stored: &Value) -> Option<MergeValue> {
     match field {
         FieldProg::LatestBy { .. } => decode_latest_by(stored),
@@ -291,8 +287,8 @@ fn decode_latest_by(v: &Value) -> Option<MergeValue> {
     })
 }
 
-/// Evaluation scope for the state-build stage: paths resolve against one raw record,
-/// and enrichment is unavailable (`lookup` ⇒ `Null`, the [`EvalContext`] default).
+/// Evaluation scope for the state-build stage: paths resolve against one raw record;
+/// enrichment is unavailable (`lookup` ⇒ `Null`).
 struct RecordScope<'a> {
     record: &'a Value,
 }

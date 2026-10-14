@@ -1,7 +1,5 @@
-//! Mergeable state primitives (`LatestBy`, `OmmitableHashMap`, `Last`, `Sum`)
-//! (PLAN §12). `old.merge(new)` throughout: `self` is the older value.
-//! [`MergeValue`] is the dynamic, schema-agnostic tree the config-driven interpreter
-//! runs on (lantern #37).
+//! Mergeable state primitives and [`MergeValue`], the dynamic schema-agnostic tree the
+//! config-driven interpreter runs on. `old.merge(new)` throughout: `self` is the older value.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -21,7 +19,6 @@ pub trait Merge {
 
 /// Keep the value with the strictly larger comparator; a **tie keeps the newer** value.
 /// Serialized as `{"comparator": …, "payload": …}` to byte-match stored v3 state.
-/// `Default` is epoch 0 for time comparators.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatestBy<C: Ord, A> {
     /// Merge key; larger wins (ties keep the newer value).
@@ -57,8 +54,8 @@ impl<C: Ord + Default + PartialEq, A: Default + PartialEq> LatestBy<C, A> {
     }
 }
 
-/// Union of two maps, merging values on key collision (`unionWith`). Deletion/eviction is
-/// NOT part of the port (maps only grow). Serialized as a plain JSON map.
+/// Union of two maps, merging values on key collision. Deletion/eviction is NOT part of
+/// the port (maps only grow).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KeyedMap<K: Eq + Hash, V>(pub HashMap<K, V>);
@@ -104,10 +101,9 @@ impl<T> LastWrite<T> {
     }
 }
 
-/// Keep the **leftmost** (first-written) `Some` — a write-once / sticky field:
-/// once assigned it never changes. The dual of [`LastWrite`]. Because the
-/// pipeline persists before committing offsets, the first assignment is stable
-/// across restarts and replay. Serialized transparently.
+/// Keep the **leftmost** (first-written) `Some` — a write-once / sticky field. Because the
+/// pipeline persists before committing offsets, the first assignment is stable across
+/// restarts and replay. Serialized transparently.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FirstWrite<T>(pub Option<T>);
@@ -154,37 +150,26 @@ impl<T: Merge> Merge for Option<T> {
     }
 }
 
-/// Dynamic state tree: one variant per schema node kind, mirroring the typed primitives
-/// exactly (`self` = old, `newer` = incoming; lantern #37):
-/// - [`MergeValue::Null`] is the identity (a `last` node's absent value, or no state).
-/// - [`MergeValue::LatestBy`] keeps the strictly larger comparator; ties keep the newer.
-/// - [`MergeValue::Map`] is `unionWith` (object and `keyed_map` nodes unify: identical
-///   merge semantics, `BTreeMap` for deterministic serialization order — typed maps are
-///   `HashMap`s with unspecified order; emitted message *sets* are equal either way).
-/// - [`MergeValue::Leaf`] is last-write-wins (a `last` node's present value).
-/// - [`MergeValue::Counter`] saturating-adds.
-///
-/// Mismatched variants (schema drift between stored and live config) keep the newer —
-/// impossible in the typed world, where the schema pins one variant per field.
+/// Dynamic state tree, one variant per schema node kind, mirroring the typed primitives.
+/// Mismatched variants on merge (schema drift between stored and live config) keep the newer.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum MergeValue {
-    /// No state (== `LastWrite(None)` / an all-identity field map).
+    /// The identity (a `last` node's absent value, or no state).
     #[default]
     Null,
-    /// `latest_by` node (== [`LatestBy`]).
+    /// `latest_by` node.
     LatestBy {
         /// Merge key; larger wins (ties keep the newer value).
         comparator: i64,
         /// Carried data.
         payload: Value,
     },
-    /// `keyed_map` / object node (== [`KeyedMap`]).
+    /// `keyed_map` / object node (`BTreeMap` for deterministic serialization order).
     Map(BTreeMap<String, Self>),
-    /// `last` node's present value (== `LastWrite(Some)`).
+    /// `last` node's present value (last-write-wins).
     Leaf(Value),
-    /// `once` node's present value (== [`FirstWrite`]`(Some)`): first-write wins,
-    /// so merging keeps the older side. Distinct from [`MergeValue::Leaf`]
-    /// (last-write) precisely in its merge direction.
+    /// `once` node's present value: first-write wins — the merge direction is what
+    /// distinguishes it from [`MergeValue::Leaf`].
     Once(Value),
     /// `counter` node (== [`Counter`]).
     Counter(i64),
@@ -237,7 +222,7 @@ impl Merge for MergeValue {
             }
             (Self::Map(mut old_entries), Self::Map(new_entries)) => {
                 for (entry_key, entry_value) in new_entries {
-                    // Reuse the LHS allocation: remove + insert instead of building a fresh map.
+                    // reuse the LHS allocation via remove + insert
                     let merged_entry = match old_entries.remove(&entry_key) {
                         Some(existing) => existing.merge(entry_value),
                         None => entry_value,
@@ -259,15 +244,9 @@ impl Merge for MergeValue {
 }
 
 impl Serialize for MergeValue {
-    /// Config-free canonical form, shape-compatible with the typed processors: a field
-    /// map omits identity entries (absent on the wire ⇔ identity on decode, so the
-    /// round trip is stable), `LatestBy` renders `{"comparator": …, "payload": …}`,
-    /// and an empty state renders `{}` like an all-default typed struct.
-    ///
-    /// Typed processors skip identities only at the field level; this impl skips at
-    /// every map level. The two differ solely for an identity `LatestBy` nested in a
-    /// `keyed_map` — impossible while admitted records yield a non-null payload for
-    /// that node, and round-trip-stable regardless (absent ⇔ identity).
+    /// Canonical form: identity entries are omitted at every map level (absent on the wire
+    /// ⇔ identity on decode, so the round trip is stable), `LatestBy` renders
+    /// `{"comparator": …, "payload": …}`, and an empty state renders `{}`.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Null => {

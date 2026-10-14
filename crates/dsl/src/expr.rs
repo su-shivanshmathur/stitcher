@@ -55,8 +55,8 @@ pub enum BinOp {
 }
 
 impl BinOp {
-    /// The comparison operator a `cmp_op` grammar token denotes, if any. `&&`/`||`
-    /// are folded implicitly (never tokens), so they are never produced here.
+    /// The comparison operator a `cmp_op` token denotes, if any (`&&`/`||` are folded
+    /// implicitly, never tokens).
     #[must_use]
     pub fn from_comparison(token: &str) -> Option<Self> {
         Some(match token {
@@ -221,9 +221,9 @@ pub enum Expr {
     Call(Builtin, Vec<Self>),
 }
 
-/// Defensive cap on raw source length. The pest call limit in [`crate::grammar`] is the real
-/// stack guard against pathological nesting; this just fails faster and more legibly on absurd
-/// input and bounds parse memory. Any real expression is orders of magnitude under this.
+/// Defensive cap on raw source length: fails fast and legibly on absurd input and bounds
+/// parse memory (the pest call limit is the real stack guard). Any real expression is
+/// orders of magnitude under this.
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 
 /// Parse DSL source into an [`Expr`] (fails fast on syntax, unknown builtins, arity).
@@ -239,8 +239,8 @@ pub fn compile(src: &str) -> Result<Expr, String> {
 /// Chars of source shown in error messages before eliding (see [`elide`]).
 const ELIDE_HEAD: usize = 80;
 
-/// Source for an error message, shortened so a long expression can't bury the actual reason
-/// (e.g. pest's "call limit reached"). Short sources are shown whole.
+/// Source for an error message, elided past [`ELIDE_HEAD`] chars so a long expression can't
+/// bury the actual reason.
 fn elide(src: &str) -> String {
     match src.char_indices().nth(ELIDE_HEAD) {
         // `cut` is a char boundary by construction, so `get` is always `Some`; the empty default
@@ -254,10 +254,8 @@ fn elide(src: &str) -> String {
     }
 }
 
-/// Parse error → message. pest's `Display` embeds the ENTIRE source line (plus a caret), so a
-/// long expression buries the reason under tens of KB of itself even with [`elide`] on the
-/// prefix. Past the elide threshold, print just the variant message + position; short sources
-/// keep pest's full caret rendering (the visual diagnostic is worth the bytes there).
+/// Parse error → message. pest's `Display` embeds the ENTIRE source line, so past the elide
+/// threshold print just the variant message + position; short sources keep the caret rendering.
 fn fmt_parse_error(src: &str, e: pest::error::Error<Rule>) -> String {
     if src.len() > ELIDE_HEAD {
         // `line_col` is a field (pest 2.9): `Pos` for point errors, a `Span` start for spans
@@ -287,10 +285,8 @@ fn within_source_limit(src: &str) -> Result<(), String> {
         })
 }
 
-/// Belt-and-braces cap on the AST walk's own recursion. The pest call limit already fails deep
-/// nesting during parsing, so `build` never sees a tree this deep in practice — but the walk is
-/// recursive, so the cap keeps it total regardless of how the grammar evolves. Real expressions
-/// sit far below this.
+/// Belt-and-braces cap on the AST walk's own recursion — the pest call limit already fails
+/// deep nesting during parsing, but the walk is recursive, so the cap keeps it total.
 const MAX_DEPTH: u32 = 256;
 
 /// pest-pair → AST.
@@ -308,7 +304,6 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
             build(inner, depth + 1)
         }
         // `||` / `&&` layers: left-associative folds over same-operator children
-        // (the operator literals are implicit — every child is joined the same way).
         Rule::or => fold_binary(pair, BinOp::Or, depth),
         Rule::and => fold_binary(pair, BinOp::And, depth),
         // comparison layer: `term (cmp_op term)?` — non-associative, ≤ 1 operator.
@@ -396,9 +391,8 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
     }
 }
 
-/// Left-associative fold of a precedence layer's same-operator children
-/// (`or` → `||`, `and` → `&&`). A lone child passes through un-wrapped so a bare
-/// term never gains a spurious `Bin` node.
+/// Left-associative fold of a precedence layer's same-operator children; a lone child
+/// passes through un-wrapped.
 fn fold_binary(pair: Pair<'_, Rule>, op: BinOp, depth: u32) -> Result<Expr, String> {
     let mut inner = pair.into_inner();
     let mut acc = build(inner.next().ok_or("empty binary layer")?, depth + 1)?;
