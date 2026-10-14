@@ -136,16 +136,38 @@ pub fn value_as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-/// Reference equality used by generated code (no owned temporaries → clippy-clean).
+/// JSON equality used by the evaluator (and generated code): two *numbers* compare by
+/// numeric value — `1 == 1.0` (serde_json's structural `Number` equality would call them
+/// different, silently mis-routing records whose producers emit `1.0`); everything else is
+/// structural (`"1" != 1`, `true != 1`).
 #[must_use]
 pub fn json_eq(a: &Value, b: &Value) -> bool {
-    a == b
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => num_eq(x, y),
+        _ => a == b,
+    }
 }
 
-/// Reference inequality.
+/// Inequality — the negation of [`json_eq`], so number coercion applies here too
+/// (`1 != 1.0` is `false`).
 #[must_use]
 pub fn json_ne(a: &Value, b: &Value) -> bool {
-    a != b
+    !json_eq(a, b)
+}
+
+/// Numeric equality: exact over the integer representations; f64 once a float is
+/// involved (f64 semantics being the natural comparison there).
+fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
+    if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+        return xi == yi;
+    }
+    if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
+        return xu == yu;
+    }
+    match (x.as_f64(), y.as_f64()) {
+        (Some(xf), Some(yf)) => xf == yf,
+        _ => false,
+    }
 }
 
 /// A map-key string out of a JSON value: meaningful strings pass through, numbers stringify,

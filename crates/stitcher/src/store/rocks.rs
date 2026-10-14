@@ -143,6 +143,54 @@ impl RocksStore {
         .await
     }
 
+    /// Batched RocksDB write: one `WriteBatch` per chunk (≤1024 entries), WAL disabled.
+    async fn put_many_inner(&self, entries: &[(Key, Vec<u8>)], version: i64) -> StitcherResult<()> {
+        const CHUNK_SIZE: usize = 1024;
+        let n_entries = entries.len();
+        // pre-encode all (key_bytes, framed_value) pairs before entering spawn_blocking
+        let encoded: Vec<(Vec<u8>, Vec<u8>)> = entries
+            .iter()
+            .map(|(key, blob)| (key.as_bytes().to_vec(), codec::frame(version, blob)))
+            .collect();
+        super::traced(
+            "rocksdb",
+            metrics::store_put_seconds,
+            |&(), secs| {
+                tracing::debug!(
+                    entries = n_entries,
+                    elapsed_ms = secs * 1e3,
+                    "rocksdb: put_many (write_batch, wal disabled)"
+                );
+            },
+            async {
+                let db = Arc::clone(&self.db);
+                let column_family_name = self.state_column_family.clone();
+                spawn_blocking(move || -> StitcherResult<()> {
+                    let column_family = db.cf_handle(&column_family_name).ok_or_else(|| {
+                        error_stack::report!(StitcherError::Rocks(format!(
+                            "column family {column_family_name} missing"
+                        )))
+                    })?;
+                    let mut wopts = rocksdb::WriteOptions::default();
+                    wopts.disable_wal(true); // cache only; remote is authoritative
+                    for chunk in encoded.chunks(CHUNK_SIZE) {
+                        let mut batch = rocksdb::WriteBatch::default();
+                        for (key_bytes, value) in chunk {
+                            batch.put_cf(&column_family, key_bytes, value);
+                        }
+                        db.write_opt(batch, &wopts)
+                            .change_context(StitcherError::Rocks("write_batch".to_string()))?;
+                    }
+                    Ok(())
+                })
+                .await
+                .change_context(StitcherError::Rocks("spawn_blocking join".to_string()))??;
+                Ok(())
+            },
+        )
+        .await
+    }
+
     async fn put_inner(&self, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
         super::traced(
             "rocksdb",
@@ -201,6 +249,17 @@ impl Store for RocksStore {
         blob: &[u8],
     ) -> StitcherResult<()> {
         self.put_inner(key, version, blob).await
+    }
+
+    /// Batched write: chunk entries into `WriteBatch` groups (≤1024 per batch) to amortize
+    /// the per-write syscall overhead while keeping individual batches bounded in memory.
+    async fn put_many(
+        &self,
+        _id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
+        self.put_many_inner(entries, version).await
     }
 
     /// Wipes the local cache on revoke. Called after the drain wait in `pre_rebalance`;

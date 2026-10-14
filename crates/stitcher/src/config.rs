@@ -76,7 +76,12 @@ pub struct Settings {
     pub tenant_ids: Vec<String>,
     /// Inspect mode (dev/staging introspection; INSPECT.md).
     pub debug: DebugCfg,
-    /// Optional cap (seconds) on processing the final in-flight batch during shutdown.
+    /// Cap (seconds) on processing the final in-flight batch during shutdown. `None` =
+    /// unbounded, which lets a slow final batch run past the orchestrator's kill deadline
+    /// (k8s `terminationGracePeriodSeconds`, ~30s) and get SIGKILL'd mid-flush. Keep this
+    /// below that deadline *minus* the producer flush budget (~10s, see `pipeline`): on
+    /// timeout the batch aborts pre-commit and replays on restart (at-least-once), which is
+    /// safer than a mid-write kill. Defaults to `Some(20)`.
     pub shutdown_grace_secs: Option<u64>,
     /// Max concurrent remote reads within a batch.
     pub read_concurrency: usize,
@@ -352,7 +357,7 @@ impl Default for Settings {
             enrichment: Enrichment::default(),
             tenant_ids: Vec::new(),
             debug: DebugCfg::default(),
-            shutdown_grace_secs: None,
+            shutdown_grace_secs: Some(20),
             read_concurrency: 64,
             rebalance_drain_secs: 600,
         }
@@ -472,6 +477,10 @@ impl Settings {
             ),
             (self.batch.count == 0, "batch.count must be > 0"),
             (self.read_concurrency == 0, "read_concurrency must be > 0"),
+            (
+                self.shutdown_grace_secs == Some(0),
+                "shutdown_grace_secs must be > 0 when set",
+            ),
             (
                 !(0.0..=1.0).contains(&self.debug.sample),
                 "debug.sample must be within 0.0..=1.0",

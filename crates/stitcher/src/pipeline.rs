@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use rdkafka::message::Message;
 
 use error_stack::ResultExt;
@@ -73,7 +73,6 @@ pub async fn run<P: Processor>(
         inspector: &inspector,
         projection: projection.as_ref(),
         enrichment: &enrichment,
-        read_concurrency: settings.read_concurrency,
         dry_run: settings.debug.dry_run,
     };
 
@@ -278,8 +277,6 @@ struct BatchCtx<'a> {
     projection: &'a dyn Projection,
     /// Enrichment join map (handed to the projection via [`ProjectionContext`]).
     enrichment: &'a Enrichment,
-    /// Store read fan-out width.
-    read_concurrency: usize,
     /// Inspect dry-run: no DLQ, no produce, no persist (the caller skips the commit).
     dry_run: bool,
 }
@@ -469,16 +466,10 @@ async fn process_batch<P: Processor>(
             tracing::debug!(messages = msgs.len(), "producing sink records");
             ctx.producer.send_all(&msgs).await?;
 
-            // 7. dual-store persist (concurrent within the batch; concurrent dual-write
-            //    inside Store::put)
-            futures::stream::iter(states_to_persist.into_iter().map(|(key, blob)| async move {
-                store
-                    .put(proc.id_type(), &key, proc.state_version(), &blob)
-                    .await
-            }))
-            .buffer_unordered(ctx.read_concurrency)
-            .try_collect::<Vec<()>>()
-            .await?;
+            // 7. dual-store persist (batched local WriteBatch + concurrent remote writes)
+            store
+                .put_many(proc.id_type(), &states_to_persist, proc.state_version())
+                .await?;
         }
     }
 

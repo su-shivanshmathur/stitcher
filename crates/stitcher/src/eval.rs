@@ -4,6 +4,8 @@
 //! state interpreter and the output transformer are then just two `EvalContext` impls
 //! over the same [`eval`], which keeps their semantics identical by construction.
 
+use std::borrow::Cow;
+
 use serde_json::Value;
 use stitcher_dsl::expr::{BinOp, Builtin, Expr, TimeFormat};
 
@@ -11,16 +13,16 @@ use crate::{builtins, json_util};
 
 /// The scope an [`Expr`] evaluates against.
 ///
-/// Path roots differ (a raw record vs. the merged state + `each` element) and
-/// enrichment is only reachable in some contexts, so those are the trait's methods;
-/// literals, operators and pure builtins are handled once in [`eval`].
-pub trait EvalContext {
+/// The lifetime `'a` is tied to the DATA the scope borrows (the record or merged state),
+/// not to `&self` — so `resolve_path`/`root` can return `Borrowed` references that
+/// outlive the (short-lived) scope struct itself.
+pub trait EvalContext<'a> {
     /// Resolve a dotted path to a value; a miss yields [`Value::Null`].
-    fn resolve_path(&self, path: &str) -> Value;
+    fn resolve_path(&self, path: &str) -> Cow<'a, Value>;
 
     /// `$` — the whole record, as sent. Default: unavailable in this context ⇒ `Null`.
-    fn root(&self) -> Value {
-        Value::Null
+    fn root(&self) -> Cow<'a, Value> {
+        Cow::Owned(Value::Null)
     }
 
     /// `lookup(table, key)` enrichment join. Default: enrichment is unavailable in
@@ -32,21 +34,18 @@ pub trait EvalContext {
 
 /// Evaluate an expression in `cx`. Total: unresolved paths yield `Null`, non-numeric
 /// comparisons yield `false`; never panics.
-pub fn eval<C: EvalContext>(expr: &Expr, cx: &C) -> Value {
+pub fn eval<'a, C: EvalContext<'a>>(expr: &Expr, cx: &C) -> Cow<'a, Value> {
     match expr {
         Expr::Root => cx.root(),
         Expr::Path(path) => cx.resolve_path(path),
-        Expr::Str(s) => Value::String(s.clone()),
-        Expr::Int(i) => Value::from(*i),
-        Expr::Float(f) => Value::from(*f),
-        Expr::Bool(b) => Value::from(*b),
-        Expr::Null => Value::Null,
-        Expr::Not(inner) => Value::from(!builtins::truthy(&eval(inner, cx))),
-        Expr::Bin(op, lhs, rhs) => apply_bin(*op, &eval(lhs, cx), &eval(rhs, cx)),
-        Expr::Call(builtin, args) => {
-            let values: Vec<Value> = args.iter().map(|arg| eval(arg, cx)).collect();
-            apply_builtin(*builtin, &values, cx)
-        }
+        Expr::Str(s) => Cow::Owned(Value::String(s.clone())),
+        Expr::Int(i) => Cow::Owned(Value::from(*i)),
+        Expr::Float(f) => Cow::Owned(Value::from(*f)),
+        Expr::Bool(b) => Cow::Owned(Value::from(*b)),
+        Expr::Null => Cow::Owned(Value::Null),
+        Expr::Not(inner) => Cow::Owned(Value::from(!builtins::truthy(&eval(inner, cx)))),
+        Expr::Bin(op, lhs, rhs) => Cow::Owned(apply_bin(*op, &eval(lhs, cx), &eval(rhs, cx))),
+        Expr::Call(builtin, args) => Cow::Owned(apply_builtin(*builtin, args, cx)),
     }
 }
 
@@ -63,43 +62,57 @@ fn apply_bin(op: BinOp, lhs: &Value, rhs: &Value) -> Value {
     }
 }
 
-fn apply_builtin<C: EvalContext>(builtin: Builtin, args: &[Value], cx: &C) -> Value {
+/// Evaluate builtins lazily — each arg is evaluated inline, avoiding a per-call `Vec<Value>`.
+fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C) -> Value {
     match (builtin, args) {
         (Builtin::ParseTime, [arg]) => {
-            builtins::parse_time(arg, None).map_or(Value::Null, Value::from)
+            builtins::parse_time(&eval(arg, cx), None).map_or(Value::Null, Value::from)
         }
         (Builtin::ParseTime, [arg, fmt_val]) => {
             // a declared-but-unresolvable format fails closed (Null), never legacy
-            match fmt_val.as_str().and_then(|s| s.parse::<TimeFormat>().ok()) {
-                Some(fmt) => builtins::parse_time(arg, Some(fmt)).map_or(Value::Null, Value::from),
+            let fmt_cow = eval(fmt_val, cx);
+            match fmt_cow.as_str().and_then(|s| s.parse::<TimeFormat>().ok()) {
+                Some(fmt) => builtins::parse_time(&eval(arg, cx), Some(fmt)).map_or(Value::Null, Value::from),
                 None => Value::Null,
             }
         }
         (Builtin::Meaningful, [arg]) => {
-            if builtins::meaningful(arg).is_some() {
-                arg.clone()
+            let v = eval(arg, cx);
+            // return the matched value; .into_owned() moves out of Cow without cloning a Borrowed
+            if builtins::meaningful(&v).is_some() {
+                v.into_owned()
             } else {
                 Value::Null
             }
         }
         (Builtin::Bucket, [value, width]) => Value::from(builtins::bucket(
-            json_util::as_i64(value).unwrap_or(0),
-            json_util::as_i64(width).unwrap_or(0),
+            json_util::as_i64(&eval(value, cx)).unwrap_or(0),
+            json_util::as_i64(&eval(width, cx)).unwrap_or(0),
         )),
-        (Builtin::Round, [arg]) => Value::from(builtins::round_half_even(arg).unwrap_or(0)),
-        (Builtin::Trim, [arg]) => Value::from(builtins::trim(arg).unwrap_or_default()),
-        (Builtin::Lower, [arg]) => Value::from(builtins::lower(arg).unwrap_or_default()),
-        (Builtin::Coalesce, [first, second]) => builtins::coalesce(first, second)
-            .cloned()
-            .unwrap_or(Value::Null),
-        (Builtin::Latest, [arg]) => builtins::latest(arg),
-        (Builtin::First, [arg]) => builtins::first(arg),
-        (Builtin::List, [arg]) => builtins::list(arg),
-        (Builtin::Get, [value, path]) => builtins::get_field(value, path.as_str().unwrap_or("")),
-        (Builtin::Lookup, [table, key]) => match (table.as_str(), builtins::key_string(key)) {
-            (Some(table), Some(key)) => cx.lookup(table, &key),
-            _ => Value::Null,
-        },
+        (Builtin::Round, [arg]) => Value::from(builtins::round_half_even(&eval(arg, cx)).unwrap_or(0)),
+        (Builtin::Trim, [arg]) => Value::from(builtins::trim(&eval(arg, cx)).unwrap_or_default()),
+        (Builtin::Lower, [arg]) => Value::from(builtins::lower(&eval(arg, cx)).unwrap_or_default()),
+        (Builtin::Coalesce, [first, second]) => {
+            let a = eval(first, cx);
+            let b = eval(second, cx);
+            builtins::coalesce(&a, &b).cloned().unwrap_or(Value::Null)
+        }
+        (Builtin::Latest, [arg]) => builtins::latest(&eval(arg, cx)),
+        (Builtin::First, [arg]) => builtins::first(&eval(arg, cx)),
+        (Builtin::List, [arg]) => builtins::list(&eval(arg, cx)),
+        (Builtin::Get, [value, path]) => {
+            let v = eval(value, cx);
+            let p = eval(path, cx);
+            builtins::get_field(&v, p.as_str().unwrap_or(""))
+        }
+        (Builtin::Lookup, [table, key]) => {
+            let t = eval(table, cx);
+            let k = eval(key, cx);
+            match (t.as_str(), builtins::key_string(&k)) {
+                (Some(table), Some(key)) => cx.lookup(table, &key),
+                _ => Value::Null,
+            }
+        }
         // arity is checked at compile/load time
         _ => Value::Null,
     }

@@ -134,6 +134,8 @@ enum StreamShapeError {
     FieldsWithExplode,
     ElementWithoutExplode,
     BadRetention,
+    EmptyTopic,
+    SignFlagReserved,
 }
 
 impl StreamShapeError {
@@ -144,6 +146,10 @@ impl StreamShapeError {
             }
             Self::ElementWithoutExplode => "`element` requires `explode`",
             Self::BadRetention => "retention.days must be > 0 and retention.key non-empty",
+            Self::EmptyTopic => "topic must be non-empty",
+            Self::SignFlagReserved => {
+                "field name `sign_flag` is reserved while sign_flag=true (it is stamped onto every row)"
+            }
         }
     }
 }
@@ -156,6 +162,12 @@ fn compile_stream(
     let name = doc.name.clone();
     let err = move |m: String| format!("[stream {name}] {m}");
     let exploding = doc.explode.is_some();
+
+    // the row-field map depends on explode mode (see below); the reserved-name guard scans both it
+    // and `common`, since `sign_flag` is stamped onto every emitted row when sign_flag=true.
+    let row_src = if exploding { &doc.element } else { &doc.fields };
+    let sign_flag_collision = doc.sign_flag
+        && (doc.common.contains_key("sign_flag") || row_src.contains_key("sign_flag"));
 
     // structural checks, first failure wins
     let shape_error = [
@@ -173,6 +185,8 @@ fn compile_stream(
                 .as_ref()
                 .is_some_and(|r| r.days <= 0 || r.key.is_empty()),
         ),
+        (StreamShapeError::EmptyTopic, doc.topic.is_empty()),
+        (StreamShapeError::SignFlagReserved, sign_flag_collision),
     ]
     .into_iter()
     .find_map(|(error, failed)| failed.then_some(error));
@@ -181,7 +195,7 @@ fn compile_stream(
         Some(error) => Err(err(error.message().to_string())),
         None => {
             // non-explode: `fields` are the row; explode: `element` are the per-entry row
-            let row_src = if exploding { &doc.element } else { &doc.fields };
+            // (`row_src` is bound above, next to the reserved-name guard that also reads it).
             let compiled = CompiledStream {
                 name: doc.name,
                 topic: doc.topic,

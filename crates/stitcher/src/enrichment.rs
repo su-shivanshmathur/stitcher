@@ -61,11 +61,27 @@ impl std::fmt::Display for ShapeError {
 }
 
 impl Enrichment {
+    /// Parse join-map bytes as JSON (shared by the sync boot/CLI read and the async reload read).
+    fn parse_file(path: &str, bytes: &[u8]) -> StitcherResult<serde_json::Value> {
+        serde_json::from_slice(bytes)
+            .change_context(StitcherError::Enrichment(format!("parse {path} as JSON")))
+    }
+
+    /// Synchronous load for the boot path and the `check-transformer` CLI (neither is latency
+    /// sensitive, and the CLI has no runtime to offload onto).
     fn load_file(path: &str) -> StitcherResult<serde_json::Value> {
         let bytes = std::fs::read(path)
             .change_context(StitcherError::Enrichment(format!("read {path}")))?;
-        serde_json::from_slice(&bytes)
-            .change_context(StitcherError::Enrichment(format!("parse {path} as JSON")))
+        Self::parse_file(path, &bytes)
+    }
+
+    /// Async load for the background reloader: `tokio::fs` so the periodic read never blocks a
+    /// runtime worker (`std::fs::read` would, even at the 12h cadence).
+    async fn load_file_async(path: &str) -> StitcherResult<serde_json::Value> {
+        let bytes = tokio::fs::read(path)
+            .await
+            .change_context(StitcherError::Enrichment(format!("read {path}")))?;
+        Self::parse_file(path, &bytes)
     }
 
     /// The shape contract shared by boot and reload: the root must be a JSON object AND every
@@ -112,10 +128,13 @@ impl Enrichment {
             let path = cfg.config_file.clone();
             let period = std::time::Duration::from_secs(cfg.reload_secs);
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(period);
+                // Start one period out: the boot read above already loaded the map, so a plain
+                // `interval` (first tick fires immediately) would redundantly reload it at t=0.
+                let start = tokio::time::Instant::now() + period;
+                let mut tick = tokio::time::interval_at(start, period);
                 loop {
                     tick.tick().await;
-                    match Self::load_file(&path) {
+                    match Self::load_file_async(&path).await {
                         Ok(fresh) => match Self::check_reload(&fresh, &required) {
                             Ok(()) => {
                                 state.store(Arc::new(fresh));
@@ -187,12 +206,6 @@ impl Enrichment {
     #[must_use]
     pub fn boot_tables(&self) -> &[String] {
         &self.boot_tables
-    }
-
-    /// Look a key up in the join-map (top-level object members only).
-    #[must_use]
-    pub fn get(&self, key: &str) -> Option<serde_json::Value> {
-        self.state.load().get(key).cloned()
     }
 
     /// Read the whole join-map (immutable snapshot).

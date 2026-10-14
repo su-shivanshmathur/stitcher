@@ -3,7 +3,7 @@
 //! that changed) → project fields (optionally `explode`ing a map into per-entry rows merged
 //! with `common` fields) → stamp `sign_flag` → retention-filter.
 
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use serde_json::Value;
 use stitcher_dsl::expr::Expr;
@@ -103,7 +103,7 @@ impl CompiledStream {
                 };
                 // Some(None) = non-explode (sentinel row); Some(Some(c)) = per-entry rows
                 let old_rows: Vec<(String, &Value)> = match &old_exploded {
-                    Some(exploded) => Self::rows_of(exploded.as_ref()),
+                    Some(exploded) => Self::rows_of(exploded.as_deref()),
                     None => Vec::new(),
                 };
                 let old_row_index: HashMap<&str, &Value> = old_rows
@@ -111,7 +111,7 @@ impl CompiledStream {
                     .map(|(id, element)| (id.as_str(), *element))
                     .collect();
                 let new_exploded = self.eval_explode(new, ctx);
-                Self::rows_of(new_exploded.as_ref())
+                Self::rows_of(new_exploded.as_deref())
                     .into_iter()
                     .flat_map(|(row_id, new_element)| {
                         let old_row = old.zip(old_row_index.get(row_id.as_str()).copied());
@@ -122,7 +122,7 @@ impl CompiledStream {
             (true, false) => match old {
                 Some(old_state) => {
                     let exploded = self.eval_explode(old_state, ctx);
-                    Self::rows_of(exploded.as_ref())
+                    Self::rows_of(exploded.as_deref())
                         .into_iter()
                         .filter_map(|(row_id, old_element)| {
                             self.render_close(ctx, old_state, old_element, &row_id)
@@ -134,9 +134,9 @@ impl CompiledStream {
         }
     }
 
-    /// Evaluate the stream's `explode` expression (`None` when not exploding). Owned result —
-    /// entries are then borrowed as rows, so no per-entry clones.
-    fn eval_explode(&self, state: &Value, ctx: &ProjectionContext<'_>) -> Option<Value> {
+    /// Evaluate the stream's `explode` expression — borrows from `state` via `ctx`'s lifetime.
+    /// Returns `None` when not exploding; `Some(collection)` otherwise.
+    fn eval_explode<'s>(&self, state: &'s Value, ctx: &ProjectionContext<'s>) -> Option<Cow<'s, Value>> {
         self.explode.as_ref().map(|explode| {
             let base = StateScope {
                 state,
@@ -191,24 +191,14 @@ impl CompiledStream {
         if !self.passes_retention(&new_payload, ctx.now_secs) {
             return Vec::new(); // retention suppresses the pair together
         }
+        // serialize new_payload once; reuse bytes for both the emit id and the retract correlation
         let new_bytes = serialize(&new_payload);
-        let emit = self.out_msg(
-            ctx,
-            Sign::Plus,
-            row_id,
-            self.key_of(&new_scope),
-            &new_bytes,
-            &new_bytes,
-        );
         let old_payload = self.stamp_sign(old_fields, Sign::Minus);
-        let retract = self.out_msg(
-            ctx,
-            Sign::Minus,
-            row_id,
-            self.key_of(&old_scope),
-            &serialize(&old_payload),
-            &new_bytes, // pair correlation anchors on the new content
-        );
+        let old_bytes = serialize(&old_payload);
+        // retract anchors correlation on the new content (pair identity = surviving content)
+        let retract = self.out_msg_paired(ctx, Sign::Minus, row_id, self.key_of(&old_scope), old_bytes, &new_bytes);
+        // emit self-correlates on its own content
+        let emit = self.out_msg_self(ctx, Sign::Plus, row_id, self.key_of(&new_scope), new_bytes);
         vec![retract, emit]
     }
 
@@ -235,15 +225,10 @@ impl CompiledStream {
         row_id: &str,
         scope: &StateScope<'_>,
     ) -> Option<OutMsg> {
+        // serialize once; reuse bytes for both the id hash and the owned payload field
         self.passes_retention(payload, ctx.now_secs).then(|| {
-            self.out_msg(
-                ctx,
-                sign,
-                row_id,
-                self.key_of(scope),
-                &serialize(payload),
-                &serialize(payload),
-            )
+            let bytes = serialize(payload);
+            self.out_msg_self(ctx, sign, row_id, self.key_of(scope), bytes)
         })
     }
 
@@ -268,7 +253,7 @@ impl CompiledStream {
         for (name, source) in self.common.iter().chain(self.row.iter()) {
             let value = eval::eval(source, cx);
             if !value.is_null() {
-                obj.insert(name.clone(), value); // omit nulls (== omitNothingFields)
+                obj.insert(name.clone(), value.into_owned()); // omit nulls (== omitNothingFields)
             }
         }
         obj
@@ -290,49 +275,96 @@ impl CompiledStream {
             .unwrap_or_default()
     }
 
-    /// Build one output record. The ids fold the stream, stable aggregate key, row id and
-    /// serialized payload CONTENT into the causation coordinate — not the mutable projected
-    /// key — so a pair correlates across key changes and distinct content never shares an id.
-    fn out_msg(
+    /// Shared id-computation base: the 7 stable parts plus row-specific content.
+    fn id_base<'x>(
+        &'x self,
+        ctx: &'x ProjectionContext<'x>,
+        row_id: &'x str,
+        partition_text: &'x str,
+        offset_text: &'x str,
+    ) -> [&'x str; 7] {
+        [
+            &self.name,
+            &self.topic,
+            ctx.aggregate_key,
+            &ctx.causation.topic,
+            partition_text,
+            offset_text,
+            row_id,
+        ]
+    }
+
+    /// Build one output record where this row self-correlates (all lone emits, close retracts,
+    /// and the `+1` leg of a pair). Payload bytes are moved in (no third buffer).
+    fn out_msg_self(
         &self,
         ctx: &ProjectionContext<'_>,
         sign: Sign,
         row_id: &str,
         key: String,
-        payload_bytes: &[u8],
-        correlation_content: &[u8],
+        payload: Vec<u8>,
     ) -> OutMsg {
         let partition_text = ctx.causation.partition.to_string();
         let offset_text = ctx.causation.offset.to_string();
-        // correlation_id identifies the row's ±1 pair (anchored on the transition's surviving
-        // content); event_id is the same parts plus the record's own payload and sign
-        let base: [&str; 7] = [
-            &self.name,
-            &self.topic,
-            ctx.aggregate_key,
-            &ctx.causation.topic,
-            &partition_text,
-            &offset_text,
-            row_id,
-        ];
+        let base = self.id_base(ctx, row_id, &partition_text, &offset_text);
+        // correlation_id = event_id without the sign, hashing the row's own content
+        let correlation_id = envelope_id(
+            base.iter()
+                .map(|p| p.as_bytes())
+                .chain(std::iter::once(payload.as_slice())),
+        );
+        let event_id = envelope_id(
+            base.iter()
+                .map(|p| p.as_bytes())
+                .chain(std::iter::once(payload.as_slice()))
+                .chain(std::iter::once(sign.label().as_bytes())),
+        );
         OutMsg {
-            event_id: envelope_id(
-                base.iter()
-                    .map(|part| part.as_bytes())
-                    .chain(std::iter::once(payload_bytes))
-                    .chain(std::iter::once(sign.label().as_bytes())),
-            ),
-            correlation_id: envelope_id(
-                base.iter()
-                    .map(|part| part.as_bytes())
-                    .chain(std::iter::once(correlation_content)),
-            ),
+            event_id,
+            correlation_id,
             state_version: ctx.state_version,
             produced_at: ctx.now_secs,
             causation: ctx.causation.clone(),
             topic: self.topic.clone(),
             key,
-            payload: payload_bytes.to_vec(),
+            payload,
+        }
+    }
+
+    /// Build the `-1` leg of a pair: event_id hashes its own payload + sign, but correlation_id
+    /// anchors on `correlation` (the surviving `+1` content), so the pair shares one correlation.
+    fn out_msg_paired(
+        &self,
+        ctx: &ProjectionContext<'_>,
+        sign: Sign,
+        row_id: &str,
+        key: String,
+        payload: Vec<u8>,
+        correlation: &[u8],
+    ) -> OutMsg {
+        let partition_text = ctx.causation.partition.to_string();
+        let offset_text = ctx.causation.offset.to_string();
+        let base = self.id_base(ctx, row_id, &partition_text, &offset_text);
+        let correlation_id = envelope_id(
+            base.iter()
+                .map(|p| p.as_bytes())
+                .chain(std::iter::once(correlation)),
+        );
+        let event_id = envelope_id(
+            base.iter()
+                .map(|p| p.as_bytes())
+                .chain(std::iter::once(payload.as_slice()))
+                .chain(std::iter::once(sign.label().as_bytes())),
+        );
+        OutMsg {
+            event_id,
+            correlation_id,
+            state_version: ctx.state_version,
+            produced_at: ctx.now_secs,
+            causation: ctx.causation.clone(),
+            topic: self.topic.clone(),
+            key,
+            payload,
         }
     }
 
@@ -361,7 +393,22 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
             .enumerate()
             .map(|(index, value)| (index.to_string(), value))
             .collect(),
-        _ => Vec::new(),
+        Value::Null => {
+            tracing::warn!(kind = "null", "explode: unexpected scalar in state; no rows emitted");
+            Vec::new()
+        }
+        Value::Bool(_) => {
+            tracing::warn!(kind = "bool", "explode: unexpected scalar in state; no rows emitted");
+            Vec::new()
+        }
+        Value::Number(_) => {
+            tracing::warn!(kind = "number", "explode: unexpected scalar in state; no rows emitted");
+            Vec::new()
+        }
+        Value::String(_) => {
+            tracing::warn!(kind = "string", "explode: unexpected scalar in state; no rows emitted");
+            Vec::new()
+        }
     }
 }
 

@@ -221,17 +221,42 @@ pub enum Expr {
     Call(Builtin, Vec<Self>),
 }
 
+/// Defensive cap on raw source length. The pest call limit in [`crate::grammar`] is the real
+/// stack guard against pathological nesting; this just fails faster and more legibly on absurd
+/// input and bounds parse memory. Any real expression is orders of magnitude under this.
+const MAX_SOURCE_BYTES: usize = 64 * 1024;
+
 /// Parse DSL source into an [`Expr`] (fails fast on syntax, unknown builtins, arity).
 pub fn compile(src: &str) -> Result<Expr, String> {
+    within_source_limit(src)?;
     let mut pairs = parse_expr(src).map_err(|e| format!("DSL parse {src:?}: {e}"))?;
     let expr = pairs
         .next()
         .ok_or_else(|| format!("empty expression {src:?}"))?;
-    build(expr)
+    build(expr, 0)
 }
 
+/// Reject absurdly long source before parsing (see [`MAX_SOURCE_BYTES`]).
+fn within_source_limit(src: &str) -> Result<(), String> {
+    (src.len() <= MAX_SOURCE_BYTES).then_some(()).ok_or_else(|| {
+        format!(
+            "expression too long ({} bytes; max {MAX_SOURCE_BYTES})",
+            src.len()
+        )
+    })
+}
+
+/// Belt-and-braces cap on the AST walk's own recursion. The pest call limit already fails deep
+/// nesting during parsing, so `build` never sees a tree this deep in practice — but the walk is
+/// recursive, so the cap keeps it total regardless of how the grammar evolves. Real expressions
+/// sit far below this.
+const MAX_DEPTH: u32 = 256;
+
 /// pest-pair → AST.
-fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
+fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("expression nested too deeply (max {MAX_DEPTH})"));
+    }
     match pair.as_rule() {
         // entry wrapper (`file = { SOI ~ or ~ EOI }`); descend to the top expression
         Rule::file => {
@@ -239,19 +264,22 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
                 .into_inner()
                 .next()
                 .ok_or_else(|| "empty expression".to_string())?;
-            build(inner)
+            build(inner, depth + 1)
         }
         // `||` / `&&` layers: left-associative folds over same-operator children
         // (the operator literals are implicit — every child is joined the same way).
-        Rule::or => fold_binary(pair, BinOp::Or),
-        Rule::and => fold_binary(pair, BinOp::And),
+        Rule::or => fold_binary(pair, BinOp::Or, depth),
+        Rule::and => fold_binary(pair, BinOp::And, depth),
         // comparison layer: `term (cmp_op term)?` — non-associative, ≤ 1 operator.
         Rule::cmp => {
             let mut inner = pair.into_inner();
-            let lhs = build(inner.next().ok_or("empty cmp")?)?;
+            let lhs = build(inner.next().ok_or("empty cmp")?, depth + 1)?;
             match inner.next() {
                 Some(op) => {
-                    let rhs = build(inner.next().ok_or("comparison missing right operand")?)?;
+                    let rhs = build(
+                        inner.next().ok_or("comparison missing right operand")?,
+                        depth + 1,
+                    )?;
                     Ok(Expr::Bin(cmp_op(op.as_str())?, Box::new(lhs), Box::new(rhs)))
                 }
                 None => Ok(lhs),
@@ -262,14 +290,14 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
                 .into_inner()
                 .next()
                 .ok_or_else(|| "empty term".to_string())?;
-            build(inner)
+            build(inner, depth + 1)
         }
         Rule::unary => {
             let inner = pair
                 .into_inner()
                 .next()
                 .ok_or_else(|| "empty unary".to_string())?;
-            Ok(Expr::Not(Box::new(build(inner)?)))
+            Ok(Expr::Not(Box::new(build(inner, depth + 1)?)))
         }
         Rule::string => {
             let raw = pair.as_str();
@@ -299,7 +327,9 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
                 .next()
                 .ok_or_else(|| "call without callee".to_string())?
                 .as_str();
-            let args: Vec<Expr> = inner.map(build).collect::<Result<_, _>>()?;
+            let args: Vec<Expr> = inner
+                .map(|arg| build(arg, depth + 1))
+                .collect::<Result<_, _>>()?;
             let builtin: Builtin = name.parse()?;
             if !builtin.arity().allows(args.len()) {
                 return Err(format!(
@@ -324,11 +354,11 @@ fn build(pair: Pair<'_, Rule>) -> Result<Expr, String> {
 /// Left-associative fold of a precedence layer's same-operator children
 /// (`or` → `||`, `and` → `&&`). A lone child passes through un-wrapped so a bare
 /// term never gains a spurious `Bin` node.
-fn fold_binary(pair: Pair<'_, Rule>, op: BinOp) -> Result<Expr, String> {
+fn fold_binary(pair: Pair<'_, Rule>, op: BinOp, depth: u32) -> Result<Expr, String> {
     let mut inner = pair.into_inner();
-    let mut acc = build(inner.next().ok_or("empty binary layer")?)?;
+    let mut acc = build(inner.next().ok_or("empty binary layer")?, depth + 1)?;
     for child in inner {
-        acc = Expr::Bin(op, Box::new(acc), Box::new(build(child)?));
+        acc = Expr::Bin(op, Box::new(acc), Box::new(build(child, depth + 1)?));
     }
     Ok(acc)
 }

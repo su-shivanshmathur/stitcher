@@ -1,7 +1,10 @@
 //! Runtime interpreter: a [`Processor`] driven by a compiled [`Program`], evaluating DSL
 //! expressions through the shared [`crate::eval`] walker.
 
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+};
 
 use serde_json::Value;
 use stitcher_dsl::expr::Expr;
@@ -208,7 +211,7 @@ fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
                     return MergeValue::Null; // == LastWrite(None)
                 }
             }
-            let value = eval(value, record);
+            let value = eval(value, record).into_owned();
             match builtins::meaningful(&value) {
                 Some(_) => MergeValue::Leaf(value),
                 None => MergeValue::Null,
@@ -220,7 +223,7 @@ fn build_field(field: &FieldProg, record: &Value) -> MergeValue {
                     return MergeValue::Null; // == FirstWrite(None)
                 }
             }
-            let value = eval(value, record);
+            let value = eval(value, record).into_owned();
             match builtins::meaningful(&value) {
                 Some(_) => MergeValue::Once(value),
                 None => MergeValue::Null,
@@ -245,7 +248,7 @@ fn build_latest_by(comparator: &Expr, payload: &Expr, record: &Value) -> MergeVa
         .unwrap_or(0);
     MergeValue::LatestBy {
         comparator,
-        payload: eval(payload, record),
+        payload: eval(payload, record).into_owned(),
     }
 }
 
@@ -294,20 +297,20 @@ struct RecordScope<'a> {
     record: &'a Value,
 }
 
-impl EvalContext for RecordScope<'_> {
-    fn resolve_path(&self, path: &str) -> Value {
+impl<'a> EvalContext<'a> for RecordScope<'a> {
+    fn resolve_path(&self, path: &str) -> Cow<'a, Value> {
         json_util::get_path(self.record, path)
-            .cloned()
-            .unwrap_or(Value::Null)
+            .map(Cow::Borrowed)
+            .unwrap_or(Cow::Owned(Value::Null))
     }
 
-    fn root(&self) -> Value {
-        self.record.clone()
+    fn root(&self) -> Cow<'a, Value> {
+        Cow::Borrowed(self.record)
     }
 }
 
 /// Evaluate a compiled expression against one record via the shared [`crate::eval`]
-/// walker (semantics thus stay identical to the transform + generated code).
-fn eval(expr: &Expr, record: &Value) -> Value {
+/// walker; the returned `Cow` borrows from `record`'s lifetime, not the temporary scope.
+fn eval<'a>(expr: &Expr, record: &'a Value) -> Cow<'a, Value> {
     crate::eval::eval(expr, &RecordScope { record })
 }
