@@ -404,16 +404,24 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
             .enumerate()
             .map(|(index, value)| (index.to_string(), value))
             .collect(),
-        // Null is the merge identity — an absent keyed_map (before its first event) is expected, so
-        // debug, not warn (it recurs every transition per stream).
+        // Null is the merge identity — an absent collection (before its first event) is
+        // expected, so debug, not warn (it recurs every transition per stream).
         Value::Null => {
-            tracing::debug!("explode: absent (null) keyed_map; no rows emitted");
+            tracing::debug!("explode: absent (null) collection; no rows emitted");
             Vec::new()
         }
         // A non-null scalar where a keyed_map/array was expected is malformed stored state: the
         // row(s) vanish with no -1/+1, so surface it (kind only; the value may be sensitive).
         Value::Bool(_) | Value::Number(_) | Value::String(_) => {
-            tracing::warn!("explode: non-collection (scalar) state; no rows emitted");
+            let kind = match collection {
+                Value::Bool(_) => "bool",
+                Value::Number(_) => "number",
+                _ => "string",
+            };
+            tracing::warn!(
+                kind,
+                "explode: non-collection (scalar) state; no rows emitted"
+            );
             Vec::new()
         }
     }
