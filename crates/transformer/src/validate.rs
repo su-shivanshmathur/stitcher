@@ -1,5 +1,5 @@
 //! Structural validation of a compiled stream against the state schema (`state ⊇ transformer`),
-//! checked once at boot; payload/value interiors are opaque foreign JSON, trusted by convention.
+//! once at boot; payload/value interiors are opaque foreign JSON, trusted by convention.
 
 use stitcher::state::config::{FieldProg, Program};
 use stitcher_dsl::expr::{Builtin, Expr};
@@ -73,8 +73,8 @@ impl ContradictReason {
 #[derive(Clone, Copy)]
 enum LintReason {
     LiteralMapKey,
-    /// `lookup` in a gate: the verdict is recomputed for the OLD state on later transitions, so a
-    /// reload flip would strand the emitted row.
+    /// `lookup` in a gate: the verdict is recomputed for the OLD state on later transitions,
+    /// so a reload flip would strand the emitted row.
     EnrichmentDependentGate,
 }
 
@@ -111,7 +111,7 @@ impl OpaqueReason {
     }
 }
 
-/// A referenced path's standing against the schema. A `Proven` reference yields no `Verdict`.
+/// A referenced path's standing; `Proven` yields no verdict.
 #[derive(Clone, Copy)]
 enum Verdict {
     /// Trusted frontier crossing — surfaced for observability, not an error.
@@ -137,21 +137,13 @@ impl Verdict {
     }
 }
 
-/// What a finding points at, for diagnostics.
 enum FindingContext {
-    /// `$` (whole-record root).
     Root,
-    /// A dotted path, as written.
     Path(String),
-    /// A `lookup` table name.
     Table(String),
-    /// The argument of a `latest`/`first`/`list` reduction.
     ReduceArgument,
-    /// The key argument of `get`.
     GetKey,
-    /// The table argument of `lookup`.
     LookupTableArg,
-    /// The stream gate expression.
     Gate,
 }
 
@@ -168,7 +160,6 @@ impl FindingContext {
     }
 }
 
-/// One classified reference: what was read (for diagnostics) and its verdict.
 struct Finding {
     context: FindingContext,
     verdict: Verdict,
@@ -184,10 +175,9 @@ impl Finding {
     }
 }
 
-/// Validate one compiled stream against the schema. Collects every problem in a single pass and
-/// returns them joined; opaque frontier crossings are logged, not failed. `tables` is the
-/// enrichment table set: `None` ⇒ no enrichment supplied (skip `lookup` table checks), `Some`
-/// (even empty) ⇒ a configured set every `lookup` table must name.
+/// Collects every problem in a single pass, joined; opaque crossings are logged, not failed.
+/// `tables`: `None` ⇒ skip `lookup` table checks; `Some` (even empty) ⇒ every `lookup` table
+/// must name a member.
 pub(super) fn validate(
     stream: &CompiledStream,
     program: &Program,
@@ -196,8 +186,7 @@ pub(super) fn validate(
     let exploding = stream.explode.is_some();
     // The explode target is a dependency precondition: `element`/`each` only make sense over a map.
     let explode_error = explode_target_error(stream.explode.as_ref(), program);
-    // The gate is evaluated before the explode (no `each` element), so it never has `each` scope;
-    // key/common/row are evaluated per exploded row, so `each` is in scope when exploding.
+    // The gate runs before the explode (no `each` scope); key/common/row run per row.
     // A gate must not read enrichment: its verdict is recomputed for the OLD state on later
     // transitions, and a hot-reloaded `lookup` flip would strand the emitted row (FINDINGS #13).
     let gate_findings = stream.gate.iter().flat_map(|expr| {
@@ -235,7 +224,6 @@ pub(super) fn validate(
         .ok_or_else(|| errors.join("; "))
 }
 
-/// Does the tree call `lookup` (an enrichment read) anywhere, directly or nested?
 fn contains_lookup(expr: &Expr) -> bool {
     match expr {
         Expr::Call(builtin, args) => {
@@ -247,7 +235,6 @@ fn contains_lookup(expr: &Expr) -> bool {
     }
 }
 
-/// Classify every path and builtin use in one expression tree.
 fn findings(
     expr: &Expr,
     exploding: bool,
@@ -273,8 +260,8 @@ fn findings(
     }
 }
 
-/// Builtin-shape checks: reductions need a keyed_map path; `get`/`lookup` keys need string
-/// literals; everything else is structurally transparent (recurse into its arguments).
+/// Reductions need a keyed_map path; `get`/`lookup` keys need string literals; everything
+/// else recurses.
 fn call_findings(
     builtin: Builtin,
     args: &[Expr],
@@ -295,9 +282,9 @@ fn call_findings(
     }
 }
 
-/// `latest`/`first`/`list` reduce a `state.<keyed_map>`. A hard-error path reports its own, more
-/// specific verdict; otherwise (proven or merely opaque) a non-keyed-map path is a shape error — an
-/// opaque payload interior like `latest(state.f.payload.items)` is still not a map.
+/// `latest`/`first`/`list` reduce a `state.<keyed_map>`. Otherwise (proven or merely opaque)
+/// a non-keyed-map path is a shape error — an opaque payload interior like
+/// `latest(state.f.payload.items)` is still not a map.
 fn reduce_findings(args: &[Expr], exploding: bool, program: &Program) -> Vec<Finding> {
     match args {
         [Expr::Path(path)] => {
@@ -322,8 +309,7 @@ fn reduce_findings(args: &[Expr], exploding: bool, program: &Program) -> Vec<Fin
 }
 
 /// `get(value, key)`: the key must be a string literal. When `value` is a path, `get(path, 'k')`
-/// is structurally `path.k`, so classify the composed path (counter/envelope/opaque rules all
-/// apply); otherwise recurse the value expression.
+/// is structurally `path.k`, so classify the composed path; otherwise recurse the value.
 fn get_findings(
     args: &[Expr],
     exploding: bool,
@@ -338,8 +324,8 @@ fn get_findings(
                 .into_iter()
                 .collect()
         }
-        // get() on a latest/first result reaches into the reduced entry's opaque payload; validate
-        // the reduced map arg and record the crossing so the surface log is complete.
+        // get() on a latest/first result reaches into the reduced entry's opaque payload;
+        // validate the map arg and record the crossing.
         [value @ Expr::Call(Builtin::Latest | Builtin::First, _), Expr::Str(key)] => {
             let opaque = Finding::new(
                 FindingContext::Path(key.clone()),
@@ -377,9 +363,8 @@ fn get_findings(
     }
 }
 
-/// `lookup(table, key)` joins enrichment, not state: the table must be a string literal; when an
-/// enrichment set is supplied (`Some`, even empty) it must name a member; the key is a dynamic join
-/// value, so recurse it.
+/// The table must be a string literal and, when an enrichment set is supplied (`Some`, even
+/// empty), a member; the key is dynamic, so recurse it.
 fn lookup_findings(
     args: &[Expr],
     exploding: bool,
@@ -413,11 +398,8 @@ fn lookup_findings(
     }
 }
 
-/// The legal roots of a transformer path.
 enum PathRoot {
-    /// `state.…` — the merged state.
     State,
-    /// `each.…` — the current exploded element.
     Each,
 }
 
@@ -431,7 +413,6 @@ impl PathRoot {
     }
 }
 
-/// Classify a dotted path by its root and the shape of the field it names.
 fn classify_path(path: &str, exploding: bool, program: &Program) -> Option<Verdict> {
     let parts: Vec<&str> = path.split('.').collect();
     match parts.split_first() {
@@ -456,7 +437,6 @@ fn classify_path(path: &str, exploding: bool, program: &Program) -> Option<Verdi
     }
 }
 
-/// Classify a `state.<head>…` reference by the head field's shape.
 fn classify_state_field(segments: &[&str], program: &Program) -> Option<Verdict> {
     match segments.split_first() {
         Some((head, rest)) => program.fields.get(*head).map_or(
@@ -495,8 +475,6 @@ impl EnvelopeKey {
     }
 }
 
-/// Classify the segments reaching into a `{comparator, payload}` envelope (a `latest_by` field or
-/// an exploded `each` element). `payload` deeper than one level crosses the opaque frontier.
 fn classify_envelope_access(segments: &[&str]) -> Option<Verdict> {
     match segments.split_first() {
         None => None,
@@ -511,13 +489,11 @@ fn classify_envelope_access(segments: &[&str]) -> Option<Verdict> {
     }
 }
 
-/// The single `state.<field>` a path names, if it is exactly one field segment.
 fn single_state_field(path: &str) -> Option<&str> {
     path.strip_prefix("state.")
         .filter(|field| !field.contains('.'))
 }
 
-/// Whether a path is a bare `state.<field>` naming a `keyed_map`.
 fn is_keyed_map_path(path: &str, program: &Program) -> bool {
     single_state_field(path)
         .and_then(|field| program.fields.get(field))
@@ -546,7 +522,6 @@ impl ExplodeError<'_> {
     }
 }
 
-/// An `explode` target must be a single `state.<keyed_map>` path; otherwise a boot error.
 fn explode_target_error(explode: Option<&Expr>, program: &Program) -> Option<String> {
     explode
         .and_then(|expr| explode_defect(expr, program))
@@ -567,8 +542,7 @@ fn explode_defect<'a>(expr: &'a Expr, program: &Program) -> Option<ExplodeError<
     }
 }
 
-/// Surface the trusted-by-convention frontier crossings: operators see the exact unverified set.
-/// Shared by both boot and the `check-transformer` CLI (which runs this same validation path).
+/// Surface the trusted-by-convention frontier crossings; shared by boot and `check-transformer`.
 fn log_opaque_surface(all_findings: &[Finding]) {
     let opaque: Vec<String> = all_findings
         .iter()

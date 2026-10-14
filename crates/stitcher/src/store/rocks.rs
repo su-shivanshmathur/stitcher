@@ -1,10 +1,6 @@
-//! `RocksDB` local cache: one column family per `id_type` (fixed at open), keyed by the
-//! entity key — mirroring the remote `(id_type, id)` primary key, so an entity has ONE
-//! cache home regardless of delivering partition. The CF is created at open under a
-//! `state.` prefix (never aliases the default CF or the legacy `topic:partition` layout),
-//! inherits `ttl_secs`, and is wiped on revoke (ownership may move; the remote is
-//! authoritative). Writes are durable-without-WAL; blocking driver calls run on
-//! `spawn_blocking`.
+//! `RocksDB` local cache: one column family per `id_type`, keyed by entity key (mirrors
+//! the remote `(id_type, id)` PK). Wiped on revoke — the remote is authoritative. Writes
+//! skip the WAL; blocking calls run on `spawn_blocking`.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -20,13 +16,10 @@ use crate::{
     processor::Key,
 };
 
-/// Prefix isolating state column families from the default and legacy `topic:partition` ones.
 const STATE_COLUMN_FAMILY_PREFIX: &str = "state.";
 
-/// `RocksDB` cache store — one column family (`state.<id_type>`) for the process's state.
 pub struct RocksStore {
     db: Arc<DB>,
-    /// The single state column-family name, `state.<id_type>`.
     state_column_family: String,
 }
 
@@ -37,7 +30,6 @@ impl std::fmt::Debug for RocksStore {
 }
 
 impl RocksStore {
-    /// Open (or create) the DB at `cfg.path`; the `id_type` column family is created here with the TTL.
     pub fn open(cfg: &config::RocksCfg, id_type: &str) -> StitcherResult<Self> {
         let path = cfg.path.clone();
         let ttl_secs = cfg.ttl_secs;
@@ -52,11 +44,9 @@ impl RocksStore {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        // larger write buffers + WAL disabled per-put (cache only)
         opts.set_write_buffer_size(128 * 1024 * 1024);
 
-        // Every column family must be listed at open. Include default, whatever exists on disk,
-        // and the state column family (so it's created here and inherits the TTL below).
+        // every CF must be listed at open: default, on-disk, and ours (created here with the TTL)
         let default = rocksdb::DEFAULT_COLUMN_FAMILY_NAME.to_string();
         let existing = DB::list_cf(&opts, path).unwrap_or_default();
         let mut all: Vec<String> = vec![default.clone(), state_column_family.clone()];
@@ -82,8 +72,7 @@ impl RocksStore {
         }
         .change_context(StitcherError::Rocks(format!("open {path}")))?;
 
-        // Migration: drop every CF that is neither default nor ours — the legacy
-        // `topic:partition` cache, or a stale state CF for a different id_type.
+        // drop legacy `topic:partition` / stale id_type CFs
         for name in &all {
             if name != &default && name != &state_column_family {
                 db.drop_cf(name)
@@ -143,11 +132,10 @@ impl RocksStore {
         .await
     }
 
-    /// Batched RocksDB write: one `WriteBatch` per chunk (≤1024 entries), WAL disabled.
     async fn put_many_inner(&self, entries: &[(Key, Vec<u8>)], version: i64) -> StitcherResult<()> {
         const CHUNK_SIZE: usize = 1024;
         let n_entries = entries.len();
-        // pre-encode all (key_bytes, framed_value) pairs before entering spawn_blocking
+        // pre-encode before entering spawn_blocking
         let encoded: Vec<(Vec<u8>, Vec<u8>)> = entries
             .iter()
             .map(|(key, blob)| (key.as_bytes().to_vec(), codec::frame(version, blob)))
@@ -172,7 +160,7 @@ impl RocksStore {
                         )))
                     })?;
                     let mut wopts = rocksdb::WriteOptions::default();
-                    wopts.disable_wal(true); // cache only; remote is authoritative
+                    wopts.disable_wal(true);
                     for chunk in encoded.chunks(CHUNK_SIZE) {
                         let mut batch = rocksdb::WriteBatch::default();
                         for (key_bytes, value) in chunk {
@@ -217,7 +205,7 @@ impl RocksStore {
                         )))
                     })?;
                     let mut wopts = rocksdb::WriteOptions::default();
-                    wopts.disable_wal(true); // cache only; remote is authoritative
+                    wopts.disable_wal(true);
                     db.put_cf_opt(&column_family, key_bytes, value, &wopts)
                         .change_context(StitcherError::Rocks("put_cf".to_string()))?;
                     Ok(())
@@ -251,7 +239,6 @@ impl Store for RocksStore {
         self.put_inner(key, version, blob).await
     }
 
-    /// Batched write: one `WriteBatch` per ≤1024-entry chunk (amortizes syscalls, bounds memory).
     async fn put_many(
         &self,
         _id_type: &str,
@@ -261,15 +248,12 @@ impl Store for RocksStore {
         self.put_many_inner(entries, version).await
     }
 
-    /// Wipes the local cache on revoke (after the drain wait in `pre_rebalance`; on drain
-    /// timeout a batch may still be running — single-instance, a late put writes the same
-    /// bytes to both stores, so consistency holds). The column-family structure is
-    /// preserved; only its contents are range-deleted.
+    /// Wipe contents on revoke (CF kept); on drain timeout a late single-instance put is
+    /// idempotent.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
         if let RebalanceEvent::Revoke(_) = ev {
             if let Some(column_family) = self.db.cf_handle(&self.state_column_family) {
-                // Range `["", 0xFF)` covers every key: 0xFF is not a valid UTF-8 byte
-                // (max encoding byte is 0xF4 for U+10FFFF), so no entity key sorts ≥ it.
+                // `["", 0xFF)` covers every key — 0xFF is never a valid UTF-8 byte
                 let (lo, hi): (&[u8], &[u8]) = (&[], &[0xFF]);
                 self.db
                     .delete_range_cf(&column_family, lo, hi)

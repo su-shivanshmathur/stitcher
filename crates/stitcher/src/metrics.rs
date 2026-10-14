@@ -1,10 +1,8 @@
-//! Metrics: `prometheus` statics scraped via the actix-web `/metrics` endpoint.
-//! Instruments are `LazyLock<Option<_>>` self-registering statics — a construction
-//! failure logs once and disables that instrument (no panic path).
+//! Prometheus statics scraped via `/metrics`; a construction failure logs once and
+//! disables that instrument.
 
 use std::sync::LazyLock;
 
-/// The registry every instrument registers itself into (lazily, on first use).
 static REGISTRY: LazyLock<prometheus::Registry> = LazyLock::new(prometheus::Registry::new);
 
 macro_rules! counter_vec {
@@ -128,77 +126,66 @@ static CONSUMER_LAG: LazyLock<Option<prometheus::IntGaugeVec>> = LazyLock::new(|
 // recording API (stable call sites; statics stay an implementation detail)
 // ---------------------------------------------------------------------------
 
-/// One record consumed.
 pub fn messages_consumed(topic: &str) {
     if let Some(counter) = &*MESSAGES_CONSUMED_TOTAL {
         counter.with_label_values(&[topic]).inc();
     }
 }
 
-/// One record decoded into a state.
 pub fn messages_decoded() {
     if let Some(counter) = &*MESSAGES_DECODED_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }
 
-/// Filtered by design (valid record, wrong `log_type`/ids/tenant).
 pub fn messages_filtered(reason: &'static str) {
     if let Some(counter) = &*MESSAGES_FILTERED_TOTAL {
         counter.with_label_values(&[reason]).inc();
     }
 }
 
-/// Malformed record routed to the DLQ.
 pub fn messages_skipped(reason: &'static str) {
     if let Some(counter) = &*MESSAGES_SKIPPED_TOTAL {
         counter.with_label_values(&[reason]).inc();
     }
 }
 
-/// One DLQ record produced.
 pub fn dlq_produced(reason: &'static str) {
     if let Some(counter) = &*DLQ_PRODUCED_TOTAL {
         counter.with_label_values(&[reason]).inc();
     }
 }
 
-/// One stored+incoming state pair merged.
 pub fn states_merged() {
     if let Some(counter) = &*STATES_MERGED_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }
 
-/// An enrichment reload rejected for dropping a boot table (or not being an object).
 pub fn enrichment_reload_rejected() {
     if let Some(counter) = &*ENRICHMENT_RELOAD_REJECTED_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }
 
-/// One record produced to a sink topic.
 pub fn messages_produced(topic: &str) {
     if let Some(counter) = &*MESSAGES_PRODUCED_TOTAL {
         counter.with_label_values(&[topic]).inc();
     }
 }
 
-/// A pipeline error.
 pub fn errors_total(stage: &'static str) {
     if let Some(counter) = &*ERRORS_TOTAL {
         counter.with_label_values(&[stage]).inc();
     }
 }
 
-/// A batch processed.
 pub fn batches() {
     if let Some(counter) = &*BATCHES_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }
 
-/// Records in the batch.
 pub fn batch_size(record_count: usize) {
     if let Some(histogram) = &*BATCH_SIZE {
         #[allow(clippy::as_conversions)] // usize count → f64 observation; loss irrelevant
@@ -207,49 +194,42 @@ pub fn batch_size(record_count: usize) {
     }
 }
 
-/// Store read latency.
 pub fn store_get_seconds(backend: &'static str, secs: f64) {
     if let Some(histogram) = &*STORE_GET_SECONDS {
         histogram.with_label_values(&[backend]).observe(secs);
     }
 }
 
-/// Store write latency.
 pub fn store_put_seconds(backend: &'static str, secs: f64) {
     if let Some(histogram) = &*STORE_PUT_SECONDS {
         histogram.with_label_values(&[backend]).observe(secs);
     }
 }
 
-/// Produce latency.
 pub fn produce_seconds(secs: f64) {
     if let Some(histogram) = &*PRODUCE_SECONDS {
         histogram.with_label_values(&[]).observe(secs);
     }
 }
 
-/// Wall time of one batch.
 pub fn batch_process_seconds(secs: f64) {
     if let Some(histogram) = &*BATCH_PROCESS_SECONDS {
         histogram.with_label_values(&[]).observe(secs);
     }
 }
 
-/// Consume → persist latency.
 pub fn end_to_end_lag_seconds(secs: f64) {
     if let Some(histogram) = &*END_TO_END_LAG_SECONDS {
         histogram.with_label_values(&[]).observe(secs);
     }
 }
 
-/// Currently assigned partitions.
 pub fn assigned_partitions(n: usize) {
     if let Some(gauge) = &*ASSIGNED_PARTITIONS {
         gauge.set(i64::try_from(n).unwrap_or(i64::MAX));
     }
 }
 
-/// Per-partition consumer lag (rdkafka reports `-1` while unknown).
 pub fn consumer_lag(topic: &str, partition: i32, lag: i64) {
     if let Some(gauge) = &*CONSUMER_LAG {
         gauge
@@ -258,7 +238,6 @@ pub fn consumer_lag(topic: &str, partition: i32, lag: i64) {
     }
 }
 
-/// Borrow the shared prometheus registry (used by the HTTP server to gather metrics).
 pub(crate) fn registry() -> &'static prometheus::Registry {
     &REGISTRY
 }

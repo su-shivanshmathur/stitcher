@@ -1,6 +1,4 @@
-//! Kafka producer (`FutureProducer`) + DLQ. Sink records are enqueued in submission order
-//! and awaited concurrently — librdkafka preserves per-partition order, so `-1` always
-//! precedes `+1` for a key.
+//! librdkafka preserves per-partition order, so `-1` precedes `+1` per key.
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +16,6 @@ use crate::{
     processor::OutMsg,
 };
 
-/// Sink producer + DLQ.
 pub struct KafkaProducer {
     producer: FutureProducer,
     dlq_topic: String,
@@ -26,8 +23,7 @@ pub struct KafkaProducer {
 }
 
 impl KafkaProducer {
-    /// Enqueue all records (order preserved) and await every delivery; a failed delivery
-    /// fails the call so the batch isn't committed.
+    /// A failed delivery fails the call so the batch isn't committed.
     pub async fn send_all(&self, msgs: &[OutMsg]) -> StitcherResult<()> {
         let started = Instant::now();
         let mut pending = Vec::with_capacity(msgs.len());
@@ -89,8 +85,7 @@ impl KafkaProducer {
         Ok(())
     }
 
-    /// Route a malformed record to the DLQ with provenance headers (payload rides on the
-    /// record; it is never logged).
+    /// Payload rides on the record; never logged.
     pub async fn send_dlq(
         &self,
         source_topic: &str,
@@ -145,7 +140,6 @@ impl KafkaProducer {
         Ok(())
     }
 
-    /// Flush outstanding deliveries (called once during shutdown).
     pub fn flush(&self, timeout: Duration) -> StitcherResult<()> {
         self.producer
             .flush(timeout)
@@ -154,7 +148,6 @@ impl KafkaProducer {
     }
 }
 
-/// Build the sink producer.
 pub fn build(cfg: &config::Settings) -> StitcherResult<KafkaProducer> {
     let mut conf = ClientConfig::new();
     conf.set("bootstrap.servers", cfg.sink_kafka.brokers.join(","))

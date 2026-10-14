@@ -36,9 +36,8 @@ impl Sign {
     }
 }
 
-/// The source record that caused a delta: the greatest `(topic, partition, offset)` coordinate
-/// feeding the key's state in the batch — globally unique even across partitions/topics,
-/// because offsets are only per-partition unique.
+/// The source record that caused a delta: the greatest `(topic, partition, offset)` for
+/// the key's state in the batch — unique even across partitions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Causation {
     pub topic: String,
@@ -46,58 +45,50 @@ pub struct Causation {
     pub offset: i64,
 }
 
-/// One outbound Kafka record + a delivery envelope (Kafka headers) for downstream
-/// dedup/correlation of the ±1 deltas.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One sink record + envelope headers for downstream dedup/correlation.
+#[derive(Clone, Debug)]
 pub struct OutMsg {
     pub topic: String,
     pub key: Key,
     pub payload: Vec<u8>,
-    /// Dedup id: FNV-1a-128 of `(stream, topic, aggregate_key, causation, row_id, payload
-    /// content, sign)`. Content is hashed ON TOP of the causation coordinate: genuine re-emits
-    /// keep distinct ids (different source records), while a same-batch replay reuses one id.
-    /// The stable aggregate key (not the mutable projected key) anchors identity.
+    /// FNV-1a-128 of `(stream, topic, aggregate_key, causation, row_id, payload content, sign)`.
+    /// Content hashes ON TOP of the causation coordinate: genuine re-emits keep distinct ids,
+    /// a same-batch replay reuses one. Anchored on the stable aggregate key.
     pub event_id: String,
-    /// Shared by the retract and emit of one row: the same parts minus `sign`, hashing the
-    /// transition's surviving content. A `-1`/`+1` pair with one `correlation_id` is ATOMIC
-    /// downstream — if the `+1` is dropped by dedup, the `-1` must be dropped too, or a
-    /// replay strands an orphan retract (at-least-once).
+    /// The retract + emit of one row share it (same parts minus `sign`, hashing the surviving
+    /// content): the pair is ATOMIC downstream — drop both or neither, or a replay strands an
+    /// orphan retract.
     pub correlation_id: String,
-    /// Schema version (constant `Processor::state_version`, not a per-record counter).
     pub state_version: i64,
-    /// Projection wall-clock, epoch seconds.
     pub produced_at: i64,
-    /// The source coordinate that caused this delta (see [`Causation`]).
     pub causation: Causation,
 }
 
-/// Builds + merges state per record. Batching, store read-modify-write, commit and
-/// shutdown live in [`crate::pipeline::run`]; output is a [`crate::projection::Projection`].
+/// Builds + merges state per record; batching/commit/shutdown live in [`crate::pipeline::run`].
 pub trait Processor: Send + Sync + 'static {
-    /// Aggregation state monoid; must round-trip via [`Self::decode_stored`] / `Serialize`.
+    /// Must round-trip via [`Self::decode_stored`] / `Serialize`.
     type State: Merge + Default + Serialize + Send + Sync;
 
-    /// Stored-state schema version; a mismatch is treated as absent.
+    /// Mismatch ⇒ treated as absent.
     fn state_version(&self) -> i64;
 
-    /// Store `id_type` discriminator.
     fn id_type(&self) -> &str;
 
-    /// Decode stored state bytes (version already matched); `None` ⇒ absent.
+    /// Version already matched; `None` ⇒ absent.
     fn decode_stored(&self, blob: &[u8]) -> Option<Self::State>;
 
-    /// Extract the grouping key; `None` = filtered by design.
+    /// `None` = filtered by design.
     fn primary_key(&self, raw: &[u8]) -> Option<Key>;
 
-    /// Filter + build the state monoid for one record; `None` = filtered by design.
+    /// `None` = filtered by design.
     fn decode(&self, raw: &[u8]) -> Option<Self::State>;
 
-    /// Decode + key in one pass (override to parse the record once).
+    /// Override to parse the record once.
     fn decode_with_key(&self, raw: &[u8]) -> Option<(Key, Self::State)> {
         Some((self.primary_key(raw)?, self.decode(raw)?))
     }
 
-    /// Migrate a state stored under an older `version` to the current `State`; `None` (default) drops it.
+    /// `None` (default) drops it.
     fn upcast(&self, _old_version: i64, _blob: &[u8]) -> Option<Self::State> {
         None
     }

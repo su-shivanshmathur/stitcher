@@ -1,5 +1,5 @@
-//! `transformer.toml` model + ahead-of-time compilation (parse every DSL string once at
-//! boot, fail fast). Versioned; transform changes are deliberate config bumps on restart.
+//! `transformer.toml` model + ahead-of-time compilation: DSL strings parsed once at boot,
+//! fail fast. Versioned.
 
 use std::{collections::BTreeMap, path::Path};
 
@@ -20,7 +20,6 @@ struct TransformDoc {
     stream: Vec<StreamDoc>,
 }
 
-/// One `[[stream]]` entry.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StreamDoc {
@@ -48,8 +47,8 @@ struct StreamDoc {
 #[serde(deny_unknown_fields)]
 struct RetentionDoc {
     days: i64,
-    /// Row timestamp field (epoch seconds); must be creation-time-immutable (e.g. `created_at`)
-    /// so a row's −1/+1 pair always ships or is suppressed together.
+    /// Row timestamp field (epoch seconds); must be creation-time-immutable so a row's
+    /// −1/+1 pair always ships or is suppressed together.
     key: String,
 }
 
@@ -57,8 +56,7 @@ const fn default_true() -> bool {
     true
 }
 
-/// Load + compile `transformer.toml`, validated against the state schema and enrichment `tables`
-/// (`None` ⇒ no enrichment supplied; `lookup` table names not checked).
+/// Validated against the state schema and enrichment `tables` (`None` ⇒ `lookup` names unchecked).
 pub fn load(
     path: &Path,
     program: &Program,

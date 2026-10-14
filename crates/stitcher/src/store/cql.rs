@@ -1,5 +1,4 @@
-//! CQL backend via the `scylla` driver (ScyllaDB and Cassandra).
-//! Table: `id, id_type, version, state(blob=JSON)`; Quorum consistency.
+//! CQL backend (ScyllaDB / Cassandra): Quorum consistency over `id, id_type, version, state`.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -20,7 +19,6 @@ use crate::{
     processor::Key,
 };
 
-/// Reject anything but plain identifiers so config strings can't become CQL injection.
 fn validate_ident(kind: &str, ident: &str) -> StitcherResult<()> {
     let ok = !ident.is_empty() && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if ok {
@@ -32,15 +30,11 @@ fn validate_ident(kind: &str, ident: &str) -> StitcherResult<()> {
     }
 }
 
-/// Config-driven peer-address rewriting ([`config::CqlCfg::address_translation`]) for
-/// port-forwarded/NAT'd nodes that advertise an unreachable internal IP; unmapped peers
-/// pass through untouched.
 struct PeerAddressMap(HashMap<SocketAddr, SocketAddr>);
 
 #[async_trait::async_trait]
 impl AddressTranslator for PeerAddressMap {
-    // bare-elision mirrors the upstream trait declaration exactly; an explicit
-    // lifetime trips async_trait's early/late-bound desugaring (E0195).
+    // bare elision mirrors the upstream trait; explicit lifetimes trip async_trait (E0195)
     #[allow(elided_lifetimes_in_paths)]
     async fn translate_address(
         &self,
@@ -53,7 +47,6 @@ impl AddressTranslator for PeerAddressMap {
     }
 }
 
-/// `ScyllaDB` / Cassandra store.
 pub struct CqlStore {
     session: Arc<Session>,
     select: PreparedStatement,
@@ -68,12 +61,10 @@ impl std::fmt::Debug for CqlStore {
 }
 
 impl CqlStore {
-    /// Connect + prepare statements; fails fast on unreachable contact points.
     pub async fn connect(cfg: &config::CqlCfg, read_concurrency: usize) -> StitcherResult<Self> {
         validate_ident("keyspace", &cfg.keyspace)?;
         validate_ident("table", &cfg.table)?;
 
-        // Wire-level compression only; stored blobs remain raw JSON.
         let mut builder = SessionBuilder::new().compression(Some(Compression::Lz4));
         for host in &cfg.hosts {
             builder = builder.known_node(format!("{}:{}", host, cfg.port));
@@ -107,7 +98,6 @@ impl CqlStore {
         })?;
         let session = Arc::new(session);
 
-        // Fail fast: a trivial health query now beats a half-broken pipeline later.
         session
             .query_unpaged("SELECT now() FROM system.local", ())
             .await
@@ -210,7 +200,6 @@ impl Store for CqlStore {
             .into_iter()
             .flatten()
             .collect();
-        // per-key SELECT metrics come from `read_one` (via `traced`)
         Ok(pairs.into_iter().collect())
     }
 
@@ -240,10 +229,10 @@ impl Store for CqlStore {
     }
 
     async fn on_rebalance(&self, _ev: &RebalanceEvent) -> StitcherResult<()> {
-        Ok(()) // remote store is partition-agnostic
+        Ok(())
     }
 
     async fn cleanup(&self) -> StitcherResult<()> {
-        Ok(()) // session closes on drop
+        Ok(())
     }
 }

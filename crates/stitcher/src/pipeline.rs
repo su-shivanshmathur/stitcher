@@ -1,6 +1,5 @@
-//! The streaming core: per batch — decode/fold by key → merge with stored state → emit
-//! `-1`/`+1` deltas → retention-filter → produce → persist → **commit** (at-least-once).
-//! Shutdown drains in place: SIGTERM ends the source; the in-flight batch still finishes.
+//! Per batch: decode/fold by key → merge → emit ±1 deltas → retention-filter → produce →
+//! persist → commit (at-least-once). SIGTERM drains in place.
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
@@ -26,10 +25,8 @@ use crate::{
 /// One consumed batch straight off the rdkafka stream (payloads not yet owned).
 type RawBatch<'a> = Vec<rdkafka::error::KafkaResult<rdkafka::message::BorrowedMessage<'a>>>;
 
-/// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
-/// change through `projection` (the output seam — [`crate::projection::StateLogger`] by
-/// default, or a plugged-in consumer such as the `transformer` crate). The enrichment
-/// join-map is shared between boot validation and runtime.
+/// The `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
+/// change through `projection` (see [`crate::projection`]).
 pub async fn run<P: Processor>(
     proc: P,
     projection: Box<dyn Projection>,
@@ -51,7 +48,6 @@ pub async fn run<P: Processor>(
     } else {
         crate::store::build_store(&settings, proc.id_type()).await?
     };
-    // Ops HTTP server reuses the store connection just built (/metrics, /health, /state).
     crate::server::spawn(
         &settings.server.host,
         settings.server.port,
@@ -81,11 +77,9 @@ pub async fn run<P: Processor>(
     let mut transport_failures: u32 = 0;
 
     while let Some(batch) = StreamExt::next(&mut batches).await {
-        // `_batch` decrements `in_flight` when dropped — every exit path below
-        // (early `?`, shutdown timeout, loop end) releases the rebalance drain.
+        // `_batch` decrements `in_flight` on drop — every exit path releases the rebalance drain.
         let Some(_batch) = guard.begin_batch() else {
-            // Rebalance-revoke mid-batch: the owned, unprocessed records must not be
-            // skipped — stop; the range replays from the last committed watermark.
+            // revoke mid-batch: stop — the unprocessed range replays from the committed watermark
             tracing::warn!(
                 "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
             );
@@ -107,8 +101,7 @@ pub async fn run<P: Processor>(
             None => work.await,
         };
         let outcome = result?; // store/DLQ failure: no commit → at-least-once replay
-                               // Records fully processed + persisted → commit is safe even when a transport
-                               // error rode along. Dry-run (inspect tap) commits NOTHING.
+                               // fully processed + persisted ⇒ safe to commit; dry-run commits nothing
         if !ctx.dry_run {
             consumer.commit(&watermarks).await?;
         }
@@ -139,8 +132,7 @@ pub async fn run<P: Processor>(
 // shared plumbing
 // ---------------------------------------------------------------------------
 
-/// Signal task + consumed, signalled, batched source stream. Stops PULLING once
-/// signalled; `chunks_timeout` still flushes the final partial batch (drain-in-place).
+/// Signal task + batched source; stops pulling once signalled, final partial batch still flushes.
 fn spawn_source<'a>(
     consumer: &'a kafka::consumer::KafkaConsumer,
     settings: &Settings,
@@ -161,8 +153,7 @@ fn spawn_source<'a>(
     (shutdown_rx, batches)
 }
 
-/// Own the payloads (`BorrowedMessage` can't cross an await); transport errors are
-/// reported (not thrown) so finished work still commits.
+/// Own the payloads (`BorrowedMessage` can't cross an await); transport errors reported, not thrown.
 fn collect_records(batch: RawBatch<'_>) -> (Vec<OwnedRecord>, Option<String>) {
     let mut records = Vec::with_capacity(batch.len());
     let mut transport_err = None;
@@ -182,7 +173,6 @@ fn collect_records(batch: RawBatch<'_>) -> (Vec<OwnedRecord>, Option<String>) {
     (records, transport_err)
 }
 
-/// Consume → now latency of the oldest record in the batch.
 fn oldest_lag_secs(records: &[OwnedRecord]) -> Option<f64> {
     let oldest_ms = records.iter().filter_map(|r| r.timestamp_ms).min()?;
     let now_ms = std::time::SystemTime::now()
@@ -194,10 +184,8 @@ fn oldest_lag_secs(records: &[OwnedRecord]) -> Option<f64> {
     Some(lag_secs)
 }
 
-/// Transport-error ladder: exponential backoff (2^failures secs, capped), reset on a
-/// clean batch, graceful stop after MAX rounds. Returns `false` to stop consuming.
+/// Exponential backoff on transport errors (reset on a clean batch); `false` = stop.
 async fn on_transport_error(err: Option<String>, failures: &mut u32) -> bool {
-    /// Bounded transport-error tolerance before a graceful stop.
     const MAX_TRANSPORT_FAILURES: u32 = 6;
     let Some(err) = err else {
         *failures = 0;
@@ -262,22 +250,15 @@ fn spawn_signal_task(tx: tokio::sync::watch::Sender<bool>) {
 // batch work
 // ---------------------------------------------------------------------------
 
-/// Collaborators threaded into [`process_batch`] (keeps its signature small).
 struct BatchCtx<'a> {
-    /// Sink producer (+ DLQ).
     producer: &'a KafkaProducer,
-    /// Inspect tap.
     inspector: &'a inspect::Inspect,
-    /// Output seam: each state change is projected here (default logs, transformer fans out).
     projection: &'a dyn Projection,
-    /// Enrichment join map (handed to the projection via [`ProjectionContext`]).
     enrichment: &'a Enrichment,
-    /// Inspect dry-run: no DLQ, no produce, no persist (the caller skips the commit).
     dry_run: bool,
 }
 
-/// Serialize a state to a JSON value for the transform; a serialize failure (unreachable
-/// for these types) logs and yields `Null` so the pipeline stays panic-free.
+/// Serialize failure logs and yields `Null` (panic-free).
 fn state_to_value<S: serde::Serialize>(state: &S) -> serde_json::Value {
     match serde_json::to_value(state) {
         Ok(value) => value,
@@ -288,17 +269,13 @@ fn state_to_value<S: serde::Serialize>(state: &S) -> serde_json::Value {
     }
 }
 
-/// Outcome of one batch: processed work is persisted; a transport error is reported here
-/// (not as `Err`) so the caller can still commit the finished work.
+/// Transport errors are reported (not `Err`) so finished work still commits.
 #[derive(Debug, Default)]
 struct BatchOutcome {
-    /// First Kafka transport error seen while consuming this batch, if any.
     transport_error: Option<String>,
 }
 
-/// The greatest source coordinate for a key within a batch — a total order over `(topic,
-/// partition, offset)`, unique even across partitions. Borrows from `records`; materialized
-/// into an owned [`Causation`] once per key at the drain.
+/// Greatest `(topic, partition, offset)` per key — the envelope causation; owned at the drain.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CausationRef<'a> {
     topic: &'a str,
@@ -323,19 +300,17 @@ async fn process_batch<P: Processor>(
     ctx: &BatchCtx<'_>,
     batch: RawBatch<'_>,
 ) -> StitcherResult<BatchOutcome> {
-    // 1. own the payloads (BorrowedMessage can't cross an await)
+    // own the payloads
     let (records, transport_err) = collect_records(batch);
     tracing::debug!(records = records.len(), "batch received");
     if let Some(lag_secs) = oldest_lag_secs(&records) {
         metrics::end_to_end_lag_seconds(lag_secs);
     }
 
-    // 2. fold into per-key states (remove+insert: no clones); each carries its greatest
-    //    `(topic, partition, offset)` — the envelope causation token
+    // fold into per-key states; each carries its greatest source coordinate
     let mut states: HashMap<Key, (P::State, CausationRef<'_>)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
-        // (a) inspect: incoming record, with its key when decodable
         ctx.inspector.incoming(
             &rec.topic,
             rec.partition,
@@ -372,18 +347,17 @@ async fn process_batch<P: Processor>(
     }
 
     if !states.is_empty() {
-        // 3. stored states (concurrent remote reads inside the backend)
+        // stored states
         let keys: Vec<Key> = states.keys().cloned().collect();
         tracing::debug!(keys = keys.len(), "reading stored states");
         let stored = store.get_many(proc.id_type(), &keys).await?;
 
-        // 4. merge + encode deltas; 5. retention filter
+        // merge + encode deltas; retention filter
         let now = util::now_secs();
         let mut msgs: Vec<OutMsg> = Vec::new();
         let mut states_to_persist: Vec<(Key, Vec<u8>)> = Vec::with_capacity(keys.len());
-        let empty = P::State::default(); // inspect rendering of an absent old state (mempty)
+        let empty = P::State::default(); // inspect rendering of an absent old state
         for (key, (local, cause)) in states {
-            // materialize the borrowed coordinate into the owned envelope causation (once per key)
             let causation = Causation::from(cause);
             let stored_state = match stored.get(&key) {
                 Some((version, blob)) if *version == proc.state_version() => {
@@ -400,7 +374,7 @@ async fn process_batch<P: Processor>(
                 None => None,
             };
             let had_stored = stored_state.is_some();
-            // (b) inspect: `old` is rendered BEFORE `merge` consumes it
+            // inspect: rendered BEFORE `merge` consumes it
             let old_repr = ctx
                 .inspector
                 .state_enabled_for(&key)
@@ -408,8 +382,7 @@ async fn process_batch<P: Processor>(
                     Some(old) => ctx.inspector.render_state(old),
                     None => ctx.inspector.render_state(&empty),
                 });
-            // pctx borrows `key` (aggregate_key); `key` is moved into states_to_persist only after
-            // the last pctx use (the project_transition call below) — don't reorder that push up.
+            // pctx borrows `key` — keep the persist push below the project call
             let pctx = ProjectionContext {
                 now_secs: now,
                 enrichment: ctx.enrichment,
@@ -417,7 +390,7 @@ async fn process_batch<P: Processor>(
                 causation: &causation,
                 aggregate_key: key.as_str(),
             };
-            // capture the old state as a Value before `merge` consumes it (the retract leg)
+            // captured before `merge` consumes it (the retract leg)
             let old_value = stored_state.as_ref().map(state_to_value);
             let merged = match stored_state {
                 Some(old) => {
@@ -434,8 +407,7 @@ async fn process_batch<P: Processor>(
                     &ctx.inspector.render_state(&merged),
                 );
             }
-            // one transition: retract old (if any) + emit new, paired per row — serialize merged →
-            // Value once, reused for the persist blob
+            // retract old + emit new, paired per row; the Value is reused for the persist blob
             let merged_value = state_to_value(&merged);
             msgs.extend(ctx.projection.project_transition(
                 old_value.as_ref(),
@@ -450,16 +422,15 @@ async fn process_batch<P: Processor>(
             tracing::debug!(key = %key.as_str(), had_stored, blob_bytes = blob.len(), "state persisted");
             states_to_persist.push((key, blob));
         }
-        // retention is the projection's concern; produce everything it returned
+        // retention is the projection's concern
         ctx.inspector.outgoing(&msgs);
 
         if !ctx.dry_run {
-            // 6. produce first: persist-failure aborts the batch pre-commit, so a replay
-            //    re-produces (at-least-once everywhere)
+            // produce first; a persist-failure abort re-produces on replay (at-least-once)
             tracing::debug!(messages = msgs.len(), "producing sink records");
             ctx.producer.send_all(&msgs).await?;
 
-            // 7. dual-store persist (batched local WriteBatch + concurrent remote writes)
+            // dual-store persist
             store
                 .put_many(proc.id_type(), &states_to_persist, proc.state_version())
                 .await?;
@@ -471,8 +442,7 @@ async fn process_batch<P: Processor>(
     })
 }
 
-/// Filtered-by-design vs malformed: malformed → DLQ, both counted (in dry-run the DLQ
-/// write is skipped but the record is still classified + counted).
+/// Malformed → DLQ (skipped in dry-run); by-design filters are only counted.
 async fn classify_and_route(
     producer: &KafkaProducer,
     rec: &OwnedRecord,

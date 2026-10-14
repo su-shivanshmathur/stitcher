@@ -1,6 +1,4 @@
-//! `stitcher` CLI: dispatches a subcommand (`check-transformer`, CI-runnable config
-//! validation) or, by default, wires the config-driven state processor to an output
-//! projection — the transformer (feature `transform`, when configured) else the logger.
+//! `check-transformer` (CI validation) or the pipeline wired to a transformer/logger projection.
 
 use std::path::Path;
 
@@ -19,7 +17,6 @@ async fn main() -> stitcher::StitcherResult<()> {
     }
 }
 
-/// The default path: load the layered settings, build the projection, run the pipeline.
 async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::StitcherResult<()> {
     let cfg = stitcher::config::load_with(config_path, inspect)?;
     // hold the guard for process life so the non-blocking log writer flushes on shutdown
@@ -35,7 +32,7 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
     let program = stitcher::state::config::load(&state_cfg.config_file)?;
     tracing::info!(schema = %program.aggregate, version = program.version, "loaded state config");
 
-    // One enrichment read at boot: validation and the runtime share this snapshot.
+    // One enrichment read at boot, shared by validation and runtime.
     let enrichment = stitcher::enrichment::Enrichment::spawn_reloader(&cfg.enrichment)?;
     let projection = build_projection(&cfg, &program, &enrichment)?;
     stitcher::run(
@@ -47,16 +44,13 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
     .await
 }
 
-/// `check-transformer`: load the state schema, then load + validate the `transformer.toml`
-/// against it (the same `state ⊇ transformer` check boot runs). No Kafka, no store;
-/// a failure exits non-zero.
+/// The `state ⊇ transformer` check without Kafka/store; non-zero exit on failure.
 #[cfg(feature = "transform")]
 fn check_transformer(
     state: &Path,
     transformer: &Path,
     enrichment: Option<&Path>,
 ) -> stitcher::StitcherResult<()> {
-    // reuse the standard log defaults; only force human-readable output for CLI use
     let log = stitcher::config::LogCfg {
         format: stitcher::config::LogFormat::HumanReadable,
         ..stitcher::config::LogCfg::default()
@@ -89,16 +83,14 @@ fn check_transformer(
     )))
 }
 
-/// The transformer when built with `--features transform` and configured; else the logger.
 #[cfg(feature = "transform")]
 fn build_projection(
     cfg: &stitcher::config::Settings,
     program: &stitcher::state::config::Program,
     enrichment: &stitcher::enrichment::Enrichment,
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
-    // Validation and the runtime share the SAME enrichment instance: the boot table set
-    // is what reloads must retain, so a validated `lookup` can never silently resolve to
-    // null because the file changed between validation and startup.
+    // validation and runtime share the boot enrichment snapshot — validated lookups
+    // can't silently go null
     let configured: Box<dyn stitcher::Projection> = match &cfg.transform.config_file {
         Some(path) => Box::new(transformer::load(
             path,

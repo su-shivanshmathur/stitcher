@@ -12,11 +12,9 @@ use crate::{
 };
 
 /// Shared, hot-swappable join-space. Empty `Value::Null` when no file is configured.
-#[derive(Clone)]
 pub struct Enrichment {
     state: Arc<ArcSwap<serde_json::Value>>,
-    /// Tables captured by the single boot read — the set transformer `lookup`s are validated
-    /// against and every reload must retain.
+    /// Tables captured by the boot read — the set every reload must retain.
     boot_tables: Vec<String>,
 }
 
@@ -60,20 +58,18 @@ impl std::fmt::Display for ShapeError {
 }
 
 impl Enrichment {
-    /// Parse join-map bytes as JSON (shared by the sync boot/CLI read and the async reload read).
     fn parse_file(path: &str, bytes: &[u8]) -> StitcherResult<serde_json::Value> {
         serde_json::from_slice(bytes)
             .change_context(StitcherError::Enrichment(format!("parse {path} as JSON")))
     }
 
-    /// Synchronous load for the boot path and the `check-transformer` CLI.
     fn load_file(path: &str) -> StitcherResult<serde_json::Value> {
         let bytes = std::fs::read(path)
             .change_context(StitcherError::Enrichment(format!("read {path}")))?;
         Self::parse_file(path, &bytes)
     }
 
-    /// Async load for the reloader (`tokio::fs`, so the periodic read never blocks a worker).
+    /// `tokio::fs` — never blocks a worker.
     async fn load_file_async(path: &str) -> StitcherResult<serde_json::Value> {
         let bytes = tokio::fs::read(path)
             .await
@@ -81,8 +77,7 @@ impl Enrichment {
         Self::parse_file(path, &bytes)
     }
 
-    /// The shape contract shared by boot and reload: the root and every table value must be
-    /// objects (so a string-keyed `lookup` can resolve). Returns the table names.
+    /// The root and every table value must be objects (so `lookup` can resolve).
     fn table_names_of(map: &serde_json::Value) -> Result<Vec<String>, ShapeError> {
         let tables = map.as_object().ok_or(ShapeError::RootNotObject)?;
         tables
@@ -93,8 +88,7 @@ impl Enrichment {
             .map_or_else(|| Ok(tables.keys().cloned().collect()), Err)
     }
 
-    /// Load the map once, then keep it fresh in the background. A missing/blank
-    /// `config_file` disables it; reload failures keep the previous map (stale beats absent).
+    /// A missing/blank `config_file` disables it; reload failures keep the previous map.
     pub fn spawn_reloader(cfg: &config::Enrichment) -> StitcherResult<Self> {
         if cfg.config_file.is_empty() {
             return Ok(Self {
@@ -103,8 +97,7 @@ impl Enrichment {
             });
         }
         let initial = Self::load_file(&cfg.config_file)?;
-        // The boot contract IS the reload contract: shape is enforced here too, and the
-        // tables present at boot are what validated `lookup`s must keep resolving.
+        // the boot contract IS the reload contract: boot tables must be retained
         let boot_tables = Self::table_names_of(&initial).map_err(|e| {
             error_stack::report!(StitcherError::Enrichment(format!(
                 "enrichment file {}: {e}",
@@ -170,8 +163,7 @@ impl Enrichment {
         }
     }
 
-    /// Top-level table names for validating transformer `lookup` references in
-    /// `check-transformer` (CI). `None` ⇒ no enrichment file configured (skip the check).
+    /// For `check-transformer` (CI). `None` ⇒ no enrichment configured (skip the check).
     pub fn table_names(cfg: &config::Enrichment) -> StitcherResult<Option<Vec<String>>> {
         if cfg.config_file.is_empty() {
             return Ok(None);
@@ -185,14 +177,12 @@ impl Enrichment {
         })
     }
 
-    /// The boot table set (empty when no file is configured — a known-empty set, so every
-    /// `lookup` fails validation).
+    /// Empty when unconfigured — a known-empty set, so every `lookup` fails validation.
     #[must_use]
     pub fn boot_tables(&self) -> &[String] {
         &self.boot_tables
     }
 
-    /// Read the whole join-map (immutable snapshot).
     #[must_use]
     pub fn snapshot(&self) -> Arc<serde_json::Value> {
         self.state.load_full()

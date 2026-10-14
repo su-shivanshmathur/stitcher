@@ -5,8 +5,7 @@ use stitcher_dsl::TimeFormat;
 
 use crate::json_util;
 
-/// Normalize a time value to epoch nanoseconds; `fmt` declares the input unit
-/// (no format ⇒ number as-is, string as numeric or RFC3339).
+/// `fmt` declares the input unit; absent ⇒ number as-is, string numeric or RFC3339.
 #[must_use]
 pub fn parse_time(v: &Value, fmt: Option<TimeFormat>) -> Option<i64> {
     match fmt {
@@ -92,19 +91,16 @@ fn u64_to_i64(u: u64) -> Option<i64> {
     i64::try_from(u).ok()
 }
 
-/// `trim` a string value.
 #[must_use]
 pub fn trim(v: &Value) -> Option<String> {
     v.as_str().map(|s| s.trim().to_string())
 }
 
-/// `lower` a string value.
 #[must_use]
 pub fn lower(v: &Value) -> Option<String> {
     v.as_str().map(str::to_ascii_lowercase)
 }
 
-/// `coalesce`: first meaningful argument.
 #[must_use]
 pub fn coalesce<'a>(a: &'a Value, b: &'a Value) -> Option<&'a Value> {
     meaningful(a).or_else(|| meaningful(b))
@@ -136,9 +132,7 @@ pub fn value_as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-/// JSON equality used by the evaluator (and generated code): two *numbers* compare by
-/// numeric value — `1 == 1.0` (serde_json's structural equality would mis-route records
-/// whose producers emit `1.0`); everything else is structural (`"1" != 1`, `true != 1`).
+/// Numbers compare numerically (`1 == 1.0`); else structural.
 #[must_use]
 pub fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -147,13 +141,12 @@ pub fn json_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Inequality — negation of [`json_eq`], so number coercion applies (`1 != 1.0` is `false`).
 #[must_use]
 pub fn json_ne(a: &Value, b: &Value) -> bool {
     !json_eq(a, b)
 }
 
-/// Numeric equality: exact over integers, f64 once a float is involved.
+/// Exact over integers, f64 once a float is involved.
 fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
         return xi == yi;
@@ -167,8 +160,7 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     }
 }
 
-/// A map-key string out of a JSON value: meaningful strings pass through, numbers stringify,
-/// everything else is `None` (missing id ⇒ no insert).
+/// Meaningful strings pass, numbers stringify, else `None`.
 #[must_use]
 pub fn key_string(v: &Value) -> Option<String> {
     meaningful(v)?;
@@ -183,14 +175,12 @@ pub fn key_string(v: &Value) -> Option<String> {
 // collection reducers + path extraction (transform DSL)
 // ---------------------------------------------------------------------------
 
-/// `latest(map)`: the `payload` of the keyed-map entry with the greatest `comparator`
-/// (the aggregate's own recency). `Null` when empty or not a `{id: {comparator, payload}}` map.
+/// `latest(map)`: payload of the greatest-`comparator` entry; `Null` if not a keyed map.
 #[must_use]
 pub fn latest(map: &Value) -> Value {
     reduce_by_comparator(map, true)
 }
 
-/// `first(map)`: the `payload` of the entry with the smallest `comparator`.
 #[must_use]
 pub fn first(map: &Value) -> Value {
     reduce_by_comparator(map, false)
@@ -216,8 +206,7 @@ fn reduce_by_comparator(map: &Value, want_max: bool) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// `list(map)`: an array of every keyed-map entry's `payload` (or the array as-is
-/// when already an array). Empty array for anything else.
+/// Every entry's `payload` (or the array as-is); empty array otherwise.
 #[must_use]
 pub fn list(collection: &Value) -> Value {
     match collection {
@@ -232,8 +221,7 @@ pub fn list(collection: &Value) -> Value {
     }
 }
 
-/// `get(value, path)`: dotted-path lookup into a value — path into a call result,
-/// e.g. `get(latest(state.attempts), 'connector')`. `Null` on any miss.
+/// Dotted lookup; `Null` on any miss.
 #[must_use]
 pub fn get_field(value: &Value, path: &str) -> Value {
     json_util::get_path(value, path)
