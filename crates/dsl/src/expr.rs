@@ -229,20 +229,49 @@ const MAX_SOURCE_BYTES: usize = 64 * 1024;
 /// Parse DSL source into an [`Expr`] (fails fast on syntax, unknown builtins, arity).
 pub fn compile(src: &str) -> Result<Expr, String> {
     within_source_limit(src)?;
-    let mut pairs = parse_expr(src).map_err(|e| format!("DSL parse {}: {e}", elide(src)))?;
+    let mut pairs = parse_expr(src).map_err(|e| fmt_parse_error(src, e))?;
     let expr = pairs
         .next()
         .ok_or_else(|| format!("empty expression {}", elide(src)))?;
     build(expr, 0)
 }
 
+/// Chars of source shown in error messages before eliding (see [`elide`]).
+const ELIDE_HEAD: usize = 80;
+
 /// Source for an error message, shortened so a long expression can't bury the actual reason
 /// (e.g. pest's "call limit reached"). Short sources are shown whole.
 fn elide(src: &str) -> String {
-    const HEAD: usize = 80;
-    match src.char_indices().nth(HEAD) {
-        Some((cut, _)) => format!("{:?}… ({} bytes)", src.get(..cut).unwrap_or(src), src.len()),
+    match src.char_indices().nth(ELIDE_HEAD) {
+        // `cut` is a char boundary by construction, so `get` is always `Some`; the empty default
+        // keeps a future refactor from silently re-embedding the full source.
+        Some((cut, _)) => format!(
+            "{:?}… ({} bytes)",
+            src.get(..cut).unwrap_or_default(),
+            src.len()
+        ),
         None => format!("{src:?}"),
+    }
+}
+
+/// Parse error → message. pest's `Display` embeds the ENTIRE source line (plus a caret), so a
+/// long expression buries the reason under tens of KB of itself even with [`elide`] on the
+/// prefix. Past the elide threshold, print just the variant message + position; short sources
+/// keep pest's full caret rendering (the visual diagnostic is worth the bytes there).
+fn fmt_parse_error(src: &str, e: pest::error::Error<Rule>) -> String {
+    if src.len() > ELIDE_HEAD {
+        // `line_col` is a field (pest 2.9): `Pos` for point errors, a `Span` start for spans
+        let (line, col) = match e.line_col {
+            pest::error::LineColLocation::Pos(pos) => pos,
+            pest::error::LineColLocation::Span(pos, _) => pos,
+        };
+        format!(
+            "DSL parse {} at {line}:{col}: {}",
+            elide(src),
+            e.variant.message()
+        )
+    } else {
+        format!("DSL parse {}: {e}", elide(src))
     }
 }
 
