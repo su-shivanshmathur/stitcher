@@ -72,7 +72,9 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             // a declared-but-unresolvable format fails closed (Null), never legacy
             let fmt_cow = eval(fmt_val, cx);
             match fmt_cow.as_str().and_then(|s| s.parse::<TimeFormat>().ok()) {
-                Some(fmt) => builtins::parse_time(&eval(arg, cx), Some(fmt)).map_or(Value::Null, Value::from),
+                Some(fmt) => {
+                    builtins::parse_time(&eval(arg, cx), Some(fmt)).map_or(Value::Null, Value::from)
+                }
                 None => Value::Null,
             }
         }
@@ -89,7 +91,9 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             json_util::as_i64(&eval(value, cx)).unwrap_or(0),
             json_util::as_i64(&eval(width, cx)).unwrap_or(0),
         )),
-        (Builtin::Round, [arg]) => Value::from(builtins::round_half_even(&eval(arg, cx)).unwrap_or(0)),
+        (Builtin::Round, [arg]) => {
+            Value::from(builtins::round_half_even(&eval(arg, cx)).unwrap_or(0))
+        }
         (Builtin::Trim, [arg]) => Value::from(builtins::trim(&eval(arg, cx)).unwrap_or_default()),
         (Builtin::Lower, [arg]) => Value::from(builtins::lower(&eval(arg, cx)).unwrap_or_default()),
         (Builtin::Coalesce, [first, second]) => {

@@ -136,7 +136,11 @@ impl CompiledStream {
 
     /// Evaluate the stream's `explode` expression — borrows from `state` via `ctx`'s lifetime.
     /// Returns `None` when not exploding; `Some(collection)` otherwise.
-    fn eval_explode<'s>(&self, state: &'s Value, ctx: &ProjectionContext<'s>) -> Option<Cow<'s, Value>> {
+    fn eval_explode<'s>(
+        &self,
+        state: &'s Value,
+        ctx: &ProjectionContext<'s>,
+    ) -> Option<Cow<'s, Value>> {
         self.explode.as_ref().map(|explode| {
             let base = StateScope {
                 state,
@@ -196,7 +200,14 @@ impl CompiledStream {
         let old_payload = self.stamp_sign(old_fields, Sign::Minus);
         let old_bytes = serialize(&old_payload);
         // retract anchors correlation on the new content (pair identity = surviving content)
-        let retract = self.out_msg_paired(ctx, Sign::Minus, row_id, self.key_of(&old_scope), old_bytes, &new_bytes);
+        let retract = self.out_msg_paired(
+            ctx,
+            Sign::Minus,
+            row_id,
+            self.key_of(&old_scope),
+            old_bytes,
+            &new_bytes,
+        );
         // emit self-correlates on its own content
         let emit = self.out_msg_self(ctx, Sign::Plus, row_id, self.key_of(&new_scope), new_bytes);
         vec![retract, emit]
@@ -393,20 +404,16 @@ fn explode_entries(collection: &Value) -> Vec<(String, &Value)> {
             .enumerate()
             .map(|(index, value)| (index.to_string(), value))
             .collect(),
+        // Null is the merge identity — an absent keyed_map (before its first event) is expected, so
+        // debug, not warn (it recurs every transition per stream).
         Value::Null => {
-            tracing::warn!(kind = "null", "explode: unexpected scalar in state; no rows emitted");
+            tracing::debug!("explode: absent (null) keyed_map; no rows emitted");
             Vec::new()
         }
-        Value::Bool(_) => {
-            tracing::warn!(kind = "bool", "explode: unexpected scalar in state; no rows emitted");
-            Vec::new()
-        }
-        Value::Number(_) => {
-            tracing::warn!(kind = "number", "explode: unexpected scalar in state; no rows emitted");
-            Vec::new()
-        }
-        Value::String(_) => {
-            tracing::warn!(kind = "string", "explode: unexpected scalar in state; no rows emitted");
+        // A non-null scalar where a keyed_map/array was expected is malformed stored state: the
+        // row(s) vanish with no -1/+1, so surface it (kind only; the value may be sensitive).
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            tracing::warn!("explode: non-collection (scalar) state; no rows emitted");
             Vec::new()
         }
     }

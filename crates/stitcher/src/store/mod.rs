@@ -44,7 +44,12 @@ pub trait Store: Send + Sync {
     async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()>;
 
     /// Persist a batch of states; sequential fallback — backends override for efficiency.
-    async fn put_many(&self, id_type: &str, entries: &[(Key, Vec<u8>)], version: i64) -> StitcherResult<()> {
+    async fn put_many(
+        &self,
+        id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
         for (key, blob) in entries {
             self.put(id_type, key, version, blob).await?;
         }
@@ -144,7 +149,12 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
     }
 
     /// Batch-write: local uses a single `WriteBatch`; remote fans out with bounded concurrency.
-    async fn put_many(&self, id_type: &str, entries: &[(Key, Vec<u8>)], version: i64) -> StitcherResult<()> {
+    async fn put_many(
+        &self,
+        id_type: &str,
+        entries: &[(Key, Vec<u8>)],
+        version: i64,
+    ) -> StitcherResult<()> {
         let ((), ()) = tokio::try_join!(
             self.local.put_many(id_type, entries, version),
             self.remote_put_many(id_type, entries, version),

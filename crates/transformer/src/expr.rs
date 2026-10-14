@@ -28,11 +28,11 @@ impl<'a> EvalContext<'a> for StateScope<'a> {
         } else if path == "state" {
             Cow::Borrowed(self.state)
         } else if let Some(rest) = path.strip_prefix("each.") {
-            self.element
-                .map_or(Cow::Owned(Value::Null), |element| lookup_into(element, rest))
+            self.element.map_or(Cow::Owned(Value::Null), |element| {
+                lookup_into(element, rest)
+            })
         } else if path == "each" {
-            self.element
-                .map_or(Cow::Owned(Value::Null), Cow::Borrowed)
+            self.element.map_or(Cow::Owned(Value::Null), Cow::Borrowed)
         } else {
             lookup_into(self.state, path)
         }

@@ -229,21 +229,33 @@ const MAX_SOURCE_BYTES: usize = 64 * 1024;
 /// Parse DSL source into an [`Expr`] (fails fast on syntax, unknown builtins, arity).
 pub fn compile(src: &str) -> Result<Expr, String> {
     within_source_limit(src)?;
-    let mut pairs = parse_expr(src).map_err(|e| format!("DSL parse {src:?}: {e}"))?;
+    let mut pairs = parse_expr(src).map_err(|e| format!("DSL parse {}: {e}", elide(src)))?;
     let expr = pairs
         .next()
-        .ok_or_else(|| format!("empty expression {src:?}"))?;
+        .ok_or_else(|| format!("empty expression {}", elide(src)))?;
     build(expr, 0)
+}
+
+/// Source for an error message, shortened so a long expression can't bury the actual reason
+/// (e.g. pest's "call limit reached"). Short sources are shown whole.
+fn elide(src: &str) -> String {
+    const HEAD: usize = 80;
+    match src.char_indices().nth(HEAD) {
+        Some((cut, _)) => format!("{:?}… ({} bytes)", src.get(..cut).unwrap_or(src), src.len()),
+        None => format!("{src:?}"),
+    }
 }
 
 /// Reject absurdly long source before parsing (see [`MAX_SOURCE_BYTES`]).
 fn within_source_limit(src: &str) -> Result<(), String> {
-    (src.len() <= MAX_SOURCE_BYTES).then_some(()).ok_or_else(|| {
-        format!(
-            "expression too long ({} bytes; max {MAX_SOURCE_BYTES})",
-            src.len()
-        )
-    })
+    (src.len() <= MAX_SOURCE_BYTES)
+        .then_some(())
+        .ok_or_else(|| {
+            format!(
+                "expression too long ({} bytes; max {MAX_SOURCE_BYTES})",
+                src.len()
+            )
+        })
 }
 
 /// Belt-and-braces cap on the AST walk's own recursion. The pest call limit already fails deep
@@ -280,7 +292,11 @@ fn build(pair: Pair<'_, Rule>, depth: u32) -> Result<Expr, String> {
                         inner.next().ok_or("comparison missing right operand")?,
                         depth + 1,
                     )?;
-                    Ok(Expr::Bin(cmp_op(op.as_str())?, Box::new(lhs), Box::new(rhs)))
+                    Ok(Expr::Bin(
+                        cmp_op(op.as_str())?,
+                        Box::new(lhs),
+                        Box::new(rhs),
+                    ))
                 }
                 None => Ok(lhs),
             }
@@ -367,4 +383,3 @@ fn fold_binary(pair: Pair<'_, Rule>, op: BinOp, depth: u32) -> Result<Expr, Stri
 fn cmp_op(op: &str) -> Result<BinOp, String> {
     BinOp::from_comparison(op).ok_or_else(|| format!("unsupported comparison operator {op:?}"))
 }
-
