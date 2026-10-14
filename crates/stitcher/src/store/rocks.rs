@@ -1,10 +1,10 @@
-//! `RocksDB` local cache: a single column family for the processor's `id_type` (fixed at
-//! startup), keyed by the entity key — mirrors the remote `(id_type, id)` primary key, so
-//! an entity has ONE cache home regardless of which topic/partition delivered it. The column
-//! family is created at open (under a `state.` prefix, so it never aliases the default column
-//! family or the old `topic:partition` layout) and inherits `ttl_secs`; its contents are wiped
-//! on revoke (ownership may move to another instance; the remote store is authoritative). Writes
-//! are durable-without-WAL; blocking driver calls run on `spawn_blocking`.
+//! `RocksDB` local cache: one column family per `id_type` (fixed at open), keyed by the
+//! entity key — mirroring the remote `(id_type, id)` primary key, so an entity has ONE
+//! cache home regardless of delivering partition. The CF is created at open under a
+//! `state.` prefix (never aliases the default CF or the legacy `topic:partition` layout),
+//! inherits `ttl_secs`, and is wiped on revoke (ownership may move; the remote is
+//! authoritative). Writes are durable-without-WAL; blocking driver calls run on
+//! `spawn_blocking`.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -20,8 +20,7 @@ use crate::{
     processor::Key,
 };
 
-/// Prefix isolating the state column family from the default one and the legacy `topic:partition`
-/// column families.
+/// Prefix isolating state column families from the default and legacy `topic:partition` ones.
 const STATE_COLUMN_FAMILY_PREFIX: &str = "state.";
 
 /// `RocksDB` cache store — one column family (`state.<id_type>`) for the process's state.
@@ -83,13 +82,14 @@ impl RocksStore {
         }
         .change_context(StitcherError::Rocks(format!("open {path}")))?;
 
-        // Migration: drop any column family that is neither the default nor our state one — i.e.
-        // the legacy `topic:partition` cache, or a stale state column family for a different id_type.
+        // Migration: drop every CF that is neither default nor ours — the legacy
+        // `topic:partition` cache, or a stale state CF for a different id_type.
         for name in &all {
             if name != &default && name != &state_column_family {
-                db.drop_cf(name).change_context(StitcherError::Rocks(format!(
-                    "drop legacy column family {name}"
-                )))?;
+                db.drop_cf(name)
+                    .change_context(StitcherError::Rocks(format!(
+                        "drop legacy column family {name}"
+                    )))?;
             }
         }
 
@@ -235,7 +235,7 @@ impl RocksStore {
 impl Store for RocksStore {
     async fn get_many(
         &self,
-        _id_type: &str, // fixed at open; `RocksStore` is single-id_type per process
+        _id_type: &str, // fixed at open; single id_type per process
         keys: &[Key],
     ) -> StitcherResult<HashMap<Key, (i64, Vec<u8>)>> {
         self.get_many_inner(keys).await
@@ -243,7 +243,7 @@ impl Store for RocksStore {
 
     async fn put(
         &self,
-        _id_type: &str, // fixed at open; `RocksStore` is single-id_type per process
+        _id_type: &str, // fixed at open; single id_type per process
         key: &Key,
         version: i64,
         blob: &[u8],
@@ -251,8 +251,7 @@ impl Store for RocksStore {
         self.put_inner(key, version, blob).await
     }
 
-    /// Batched write: chunk entries into `WriteBatch` groups (≤1024 per batch) to amortize
-    /// the per-write syscall overhead while keeping individual batches bounded in memory.
+    /// Batched write: one `WriteBatch` per ≤1024-entry chunk (amortizes syscalls, bounds memory).
     async fn put_many(
         &self,
         _id_type: &str,
@@ -262,12 +261,10 @@ impl Store for RocksStore {
         self.put_many_inner(entries, version).await
     }
 
-    /// Wipes the local cache on revoke. Called after the drain wait in `pre_rebalance`;
-    /// normally no batch is in flight, but on drain timeout one may still be running.
-    /// In the single-instance case a late put writes the same bytes to both local and
-    /// remote, so the cache stays consistent — the stale-read risk is multi-instance
-    /// (already out of scope). The column-family structure is preserved; only its contents
-    /// are range-deleted.
+    /// Wipes the local cache on revoke (after the drain wait in `pre_rebalance`; on drain
+    /// timeout a batch may still be running — single-instance, a late put writes the same
+    /// bytes to both stores, so consistency holds). The column-family structure is
+    /// preserved; only its contents are range-deleted.
     async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
         if let RebalanceEvent::Revoke(_) = ev {
             if let Some(column_family) = self.db.cf_handle(&self.state_column_family) {

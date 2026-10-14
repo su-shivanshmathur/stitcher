@@ -1,7 +1,5 @@
-//! Transform evaluation scope: an [`EvalContext`] whose paths resolve against the merged
-//! `state` or the current `explode`d `each` element, and whose `lookup` joins the
-//! enrichment map. The [`Expr`] walk itself lives in [`stitcher::eval`] — this only supplies
-//! the two context-specific operations.
+//! Transform evaluation scope: paths resolve against the merged `state` or the current
+//! `explode`d `each` element; `lookup` joins the enrichment map.
 
 use std::borrow::Cow;
 

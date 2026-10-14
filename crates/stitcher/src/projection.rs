@@ -16,14 +16,13 @@ pub struct ProjectionContext<'a> {
     pub state_version: i64,
     /// The source coordinate that caused this key's state change (see [`Causation`]).
     pub causation: &'a Causation,
-    /// The aggregate's stable grouping key — the envelope identity anchor (immutable, unlike the
-    /// per-row projected Kafka key).
+    /// The aggregate's stable grouping key — the envelope identity anchor.
     pub aggregate_key: &'a str,
 }
 
-/// Consumes one state transition → sink records. `Send + Sync`: held across `.await`. `old` is the
-/// previously stored state (absent on first sight), `new` the merged state; the impl decides the ±1
-/// pair per row so a retract and its emit ship together.
+/// Consumes one state transition → sink records. `old` is the previously stored state
+/// (absent on first sight), `new` the merged state; the impl decides the ±1 pair per row
+/// so a retract and its emit ship together.
 pub trait Projection: Send + Sync {
     fn project_transition(
         &self,
@@ -48,8 +47,7 @@ impl Projection for StateLogger {
     }
 }
 
-/// Fans one state change to several projections, concatenating their deltas — so a config
-/// `Transform` and hand-written projections compose behind one `Projection`.
+/// Fans one state change to several projections, concatenating their deltas.
 pub struct CompositeProjection {
     members: Vec<Box<dyn Projection>>,
 }

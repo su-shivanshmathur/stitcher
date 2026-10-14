@@ -29,8 +29,7 @@ type RawBatch<'a> = Vec<rdkafka::error::KafkaResult<rdkafka::message::BorrowedMe
 /// Total `Kafka → store → Kafka` pipeline for a stateful [`Processor`], driving each state
 /// change through `projection` (the output seam — [`crate::projection::StateLogger`] by
 /// default, or a plugged-in consumer such as the `transformer` crate). The enrichment
-/// join-map is passed in, not constructed here: boot validation and the runtime share one
-/// boot snapshot.
+/// join-map is shared between boot validation and runtime.
 pub async fn run<P: Processor>(
     proc: P,
     projection: Box<dyn Projection>,
@@ -85,10 +84,8 @@ pub async fn run<P: Processor>(
         // `_batch` decrements `in_flight` when dropped — every exit path below
         // (early `?`, shutdown timeout, loop end) releases the rebalance drain.
         let Some(_batch) = guard.begin_batch() else {
-            // Rebalance-revoke while a batch was in flight: the owned, unprocessed records
-            // must NOT be skipped — a later batch's per-partition watermark would cover
-            // them. The replay-safe action is to stop here — the unprocessed range is
-            // re-consumed from the last committed watermark after restart/rejoin.
+            // Rebalance-revoke mid-batch: the owned, unprocessed records must not be
+            // skipped — stop; the range replays from the last committed watermark.
             tracing::warn!(
                 "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
             );
@@ -110,9 +107,8 @@ pub async fn run<P: Processor>(
             None => work.await,
         };
         let outcome = result?; // store/DLQ failure: no commit → at-least-once replay
-                               // The batch's records are fully processed + persisted → committing is safe even
-                               // when a transport error rode along (anything not yet consumed is unaffected).
-                               // Dry-run (inspect tap) commits NOTHING — a re-runnable, non-destructive read.
+                               // Records fully processed + persisted → commit is safe even when a transport
+                               // error rode along. Dry-run (inspect tap) commits NOTHING.
         if !ctx.dry_run {
             consumer.commit(&watermarks).await?;
         }
@@ -186,7 +182,7 @@ fn collect_records(batch: RawBatch<'_>) -> (Vec<OwnedRecord>, Option<String>) {
     (records, transport_err)
 }
 
-/// Consume → now latency of the oldest record in the batch (PLAN §Metrics).
+/// Consume → now latency of the oldest record in the batch.
 fn oldest_lag_secs(records: &[OwnedRecord]) -> Option<f64> {
     let oldest_ms = records.iter().filter_map(|r| r.timestamp_ms).min()?;
     let now_ms = std::time::SystemTime::now()
@@ -201,7 +197,7 @@ fn oldest_lag_secs(records: &[OwnedRecord]) -> Option<f64> {
 /// Transport-error ladder: exponential backoff (2^failures secs, capped), reset on a
 /// clean batch, graceful stop after MAX rounds. Returns `false` to stop consuming.
 async fn on_transport_error(err: Option<String>, failures: &mut u32) -> bool {
-    /// Bounded transport-error tolerance (PLAN §Failure modes).
+    /// Bounded transport-error tolerance before a graceful stop.
     const MAX_TRANSPORT_FAILURES: u32 = 6;
     let Some(err) = err else {
         *failures = 0;
@@ -266,8 +262,7 @@ fn spawn_signal_task(tx: tokio::sync::watch::Sender<bool>) {
 // batch work
 // ---------------------------------------------------------------------------
 
-/// Per-run collaborators threaded into [`process_batch`] (keeps its signature small and
-/// clippy-friendly).
+/// Collaborators threaded into [`process_batch`] (keeps its signature small).
 struct BatchCtx<'a> {
     /// Sink producer (+ DLQ).
     producer: &'a KafkaProducer,
@@ -301,9 +296,9 @@ struct BatchOutcome {
     transport_error: Option<String>,
 }
 
-/// The greatest source coordinate for a key within a batch — a total order over `(topic, partition,
-/// offset)`, globally unique even across partitions (unlike a bare offset). Borrows from `records`;
-/// materialized into an owned [`Causation`] once per key at the drain.
+/// The greatest source coordinate for a key within a batch — a total order over `(topic,
+/// partition, offset)`, unique even across partitions. Borrows from `records`; materialized
+/// into an owned [`Causation`] once per key at the drain.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CausationRef<'a> {
     topic: &'a str,
@@ -321,7 +316,7 @@ impl From<CausationRef<'_>> for Causation {
     }
 }
 
-/// One batch end-to-end (PLAN §Pipeline per batch); `ctx.dry_run` skips every side effect.
+/// One batch end-to-end; `ctx.dry_run` skips every side effect.
 async fn process_batch<P: Processor>(
     proc: &P,
     store: &dyn Store,
@@ -335,13 +330,12 @@ async fn process_batch<P: Processor>(
         metrics::end_to_end_lag_seconds(lag_secs);
     }
 
-    // 2. fold into per-key states (remove+insert: no clones); each carries its greatest source
-    //    `(topic, partition, offset)` coordinate — the envelope causation token, unique even if a
-    //    key's records span partitions.
+    // 2. fold into per-key states (remove+insert: no clones); each carries its greatest
+    //    `(topic, partition, offset)` — the envelope causation token
     let mut states: HashMap<Key, (P::State, CausationRef<'_>)> = HashMap::new();
     for rec in &records {
         let decoded = proc.decode_with_key(&rec.payload);
-        // (a) inspect: incoming record, with its key when decodable (INSPECT.md)
+        // (a) inspect: incoming record, with its key when decodable
         ctx.inspector.incoming(
             &rec.topic,
             rec.partition,
@@ -406,7 +400,7 @@ async fn process_batch<P: Processor>(
                 None => None,
             };
             let had_stored = stored_state.is_some();
-            // (b) inspect: `old` is rendered BEFORE `merge` consumes it (INSPECT.md)
+            // (b) inspect: `old` is rendered BEFORE `merge` consumes it
             let old_repr = ctx
                 .inspector
                 .state_enabled_for(&key)
@@ -460,9 +454,8 @@ async fn process_batch<P: Processor>(
         ctx.inspector.outgoing(&msgs);
 
         if !ctx.dry_run {
-            // 6. produce first (consumers see deltas only if the state will also persist —
-            //    but persist-failure aborts the batch pre-commit, so replay re-produces:
-            //    at-least-once everywhere)
+            // 6. produce first: persist-failure aborts the batch pre-commit, so a replay
+            //    re-produces (at-least-once everywhere)
             tracing::debug!(messages = msgs.len(), "producing sink records");
             ctx.producer.send_all(&msgs).await?;
 
@@ -519,7 +512,7 @@ async fn classify_and_route(
                     "malformed payload",
                     &rec.payload,
                 )
-                .await?; // commit is GATED on this write (PLAN §23)
+                .await?; // commit is gated on this DLQ write
         }
     }
     Ok(())

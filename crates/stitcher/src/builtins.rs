@@ -137,9 +137,8 @@ pub fn value_as_f64(v: &Value) -> Option<f64> {
 }
 
 /// JSON equality used by the evaluator (and generated code): two *numbers* compare by
-/// numeric value — `1 == 1.0` (serde_json's structural `Number` equality would call them
-/// different, silently mis-routing records whose producers emit `1.0`); everything else is
-/// structural (`"1" != 1`, `true != 1`).
+/// numeric value — `1 == 1.0` (serde_json's structural equality would mis-route records
+/// whose producers emit `1.0`); everything else is structural (`"1" != 1`, `true != 1`).
 #[must_use]
 pub fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
@@ -148,15 +147,13 @@ pub fn json_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
-/// Inequality — the negation of [`json_eq`], so number coercion applies here too
-/// (`1 != 1.0` is `false`).
+/// Inequality — negation of [`json_eq`], so number coercion applies (`1 != 1.0` is `false`).
 #[must_use]
 pub fn json_ne(a: &Value, b: &Value) -> bool {
     !json_eq(a, b)
 }
 
-/// Numeric equality: exact over the integer representations; f64 once a float is
-/// involved (f64 semantics being the natural comparison there).
+/// Numeric equality: exact over integers, f64 once a float is involved.
 fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
         return xi == yi;
@@ -183,12 +180,11 @@ pub fn key_string(v: &Value) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// collection reducers + path extraction (transform DSL; TRANSFORMER.md)
+// collection reducers + path extraction (transform DSL)
 // ---------------------------------------------------------------------------
 
-/// `latest(map)`: the `payload` of the keyed-map entry with the greatest stored
-/// `comparator` (the aggregate's own recency — the most-recently-updated entry).
-/// `Null` when empty or not a `{id: {comparator, payload}}` map.
+/// `latest(map)`: the `payload` of the keyed-map entry with the greatest `comparator`
+/// (the aggregate's own recency). `Null` when empty or not a `{id: {comparator, payload}}` map.
 #[must_use]
 pub fn latest(map: &Value) -> Value {
     reduce_by_comparator(map, true)

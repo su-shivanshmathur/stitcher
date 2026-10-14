@@ -2,31 +2,21 @@
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-// Entry rule: the expression must consume the whole input. Without the EOI
-// anchor, pest happily returns a prefix match — a path like `log_type` used to
-// truncate at the literal `log` prefix and silently drop the rest of the
-// expression.
+// Entry rule: the expression must consume the whole input — without the EOI anchor,
+// pest returns a prefix match (a path like `log_type` would truncate at `log`).
 file    = { SOI ~ or ~ EOI }
 
-// Precedence, loosest to tightest: `||` binds looser than `&&`, which binds
-// looser than the comparison operators. `||`/`&&` are left-associative folds
-// (every `or` child is OR-joined, every `and` child AND-joined); comparison is
-// NON-associative — at most one `cmp_op` per level, so `a == b == c` is a parse
-// error and alternations like `a == b || c == d` group as `(a==b) || (c==d)`.
-// Only `cmp_op` is a named rule (the walker reads which comparison it is); the
-// `||`/`&&` literals are implicit in the fold.
+// Precedence, loosest to tightest: `||` < `&&` < comparison. `||`/`&&` are
+// left-associative folds; comparison is NON-associative (at most one `cmp_op`
+// per level, so `a == b == c` is a parse error). Only `cmp_op` is a named rule.
 or      = { and ~ ("||" ~ and)* }
 and     = { cmp ~ ("&&" ~ cmp)* }
 cmp     = { term ~ (cmp_op ~ term)? }
 term    = { literal | call | path | root | unary | "(" ~ or ~ ")" }
 unary   = { "!" ~ term }
 call    = { ident ~ "(" ~ (or ~ ("," ~ or)*)? ~ ")" }
-// Identifier-rooted path: the record envelope carries fields next to the `log`
-// payload (`log_type`, `tenant_id`, …), so paths are not `log`-prefixed only —
-// same resolution space as the key template / decode-filter paths. Atomic so
-// no whitespace can sneak into the matched span (a non-atomic path retains
-// the space skipped before its zero-width repetition, e.g. `log_type == 'x'`
-// would otherwise capture `"log_type "`).
+// Identifier-rooted path (envelope fields sit next to `log`, so paths are not
+// `log`-prefixed only). Atomic so no whitespace sneaks into the matched span.
 path    = @{ ident ~ ("." ~ ident)* }
 // `$` = the whole record (the event as sent), for flat schemas with no envelope.
 root    = @{ "$" }
@@ -34,10 +24,8 @@ literal = { string | number | bool | null }
 string  = @{ ("'" ~ (!"'" ~ ANY)* ~ "'") | ("\"" ~ (!"\"" ~ ANY)* ~ "\"") }
 number  = @{ "-"? ~ ("0" | '1'..'9' ~ '0'..'9'*) ~ ("." ~ '0'..'9'*)? }
 // Keyword literals carry a negative lookahead: `literal` is tried before `path` in
-// `term`, and PEG commits on the first matching alternative — without the lookahead
-// a top-level field like `nullable` or `true_flag` would match the `null`/`true`
-// prefix and strand the rest of the input at EOI. The lookahead only succeeds at a
-// word boundary (a non-identifier character, or end of input).
+// `term` and PEG commits on the first match — without it, a field like `nullable`
+// would match the `null` prefix and strand the rest of the input at EOI.
 bool    = @{ ("true" | "false") ~ !ident_char }
 null    = @{ "null" ~ !ident_char }
 // One character that can continue an identifier.

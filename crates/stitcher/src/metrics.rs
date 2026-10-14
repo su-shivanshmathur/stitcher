@@ -1,7 +1,6 @@
-//! Metrics: `prometheus` statics scraped via the actix-web `/metrics` endpoint (PLAN #22).
+//! Metrics: `prometheus` statics scraped via the actix-web `/metrics` endpoint.
 //! Instruments are `LazyLock<Option<_>>` self-registering statics — a construction
-//! failure logs once and disables that instrument (no panic path). The scrape endpoint
-//! itself lives in [`crate::server`], which gathers this crate's [`registry`].
+//! failure logs once and disables that instrument (no panic path).
 
 use std::sync::LazyLock;
 

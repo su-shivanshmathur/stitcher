@@ -1,6 +1,6 @@
-//! `stitcher` CLI: dispatches a subcommand (currently `check-transformer`, a CI-runnable
-//! config validation) or, by default, wires the config-driven state processor to an output
-//! projection — the transformer (feature `transform`, when configured) else the state logger.
+//! `stitcher` CLI: dispatches a subcommand (`check-transformer`, CI-runnable config
+//! validation) or, by default, wires the config-driven state processor to an output
+//! projection — the transformer (feature `transform`, when configured) else the logger.
 
 use std::path::Path;
 
@@ -35,8 +35,7 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
     let program = stitcher::state::config::load(&state_cfg.config_file)?;
     tracing::info!(schema = %program.aggregate, version = program.version, "loaded state config");
 
-    // One enrichment read at boot: validation and the runtime share this snapshot,
-    // so swapping the file between them can't desynchronize validated lookups.
+    // One enrichment read at boot: validation and the runtime share this snapshot.
     let enrichment = stitcher::enrichment::Enrichment::spawn_reloader(&cfg.enrichment)?;
     let projection = build_projection(&cfg, &program, &enrichment)?;
     stitcher::run(
@@ -49,8 +48,8 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
 }
 
 /// `check-transformer`: load the state schema, then load + validate the `transformer.toml`
-/// against it (the same `state ⊇ transformer` check boot runs). No Kafka, no store — a dry run
-/// suitable for CI. A validation failure returns `Err`, which exits non-zero.
+/// against it (the same `state ⊇ transformer` check boot runs). No Kafka, no store;
+/// a failure exits non-zero.
 #[cfg(feature = "transform")]
 fn check_transformer(
     state: &Path,
@@ -97,10 +96,9 @@ fn build_projection(
     program: &stitcher::state::config::Program,
     enrichment: &stitcher::enrichment::Enrichment,
 ) -> stitcher::StitcherResult<Box<dyn stitcher::Projection>> {
-    // Validation and the runtime share the SAME enrichment instance: the boot table set is
-    // what reloads must retain, so a validated `lookup` can never silently resolve to null
-    // because the file changed between validation and startup. An absent file is a
-    // KNOWN-EMPTY set — every `lookup` fails validation at boot.
+    // Validation and the runtime share the SAME enrichment instance: the boot table set
+    // is what reloads must retain, so a validated `lookup` can never silently resolve to
+    // null because the file changed between validation and startup.
     let configured: Box<dyn stitcher::Projection> = match &cfg.transform.config_file {
         Some(path) => Box::new(transformer::load(
             path,

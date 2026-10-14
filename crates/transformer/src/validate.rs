@@ -1,33 +1,20 @@
-//! Node-type-aware structural validation of a compiled stream against the state schema
-//! `Program` (TRANSFORMER_ROADMAP.md Phase 1). Enforces the invariant **state ⊇ transformer**:
-//! every path a stream reads must be producible by the schema, checked once at boot (fail fast),
-//! never per-record.
-//!
-//! The frontier is fixed at top-level field keys plus the one envelope level the merge-node type
-//! guarantees (`comparator`/`payload` for `latest_by`/`keyed_map`); payload/value interiors are
-//! opaque foreign JSON, trusted by convention, not validated. Replaces the old head-only check,
-//! which classified only the first path segment and ignored node type.
+//! Structural validation of a compiled stream against the state schema (`state ⊇ transformer`),
+//! checked once at boot; payload/value interiors are opaque foreign JSON, trusted by convention.
 
 use stitcher::state::config::{FieldProg, Program};
 use stitcher_dsl::expr::{Builtin, Expr};
 
 use super::engine::CompiledStream;
 
-/// What the state schema guarantees about a top-level field's stored shape.
 #[derive(Clone, Copy)]
 enum FieldShape {
-    /// `latest_by`: `{comparator: i64ns, payload: <expr>}`.
     Envelope,
-    /// `keyed_map`: `{<key>: {comparator, payload}, …}` — a reduce/explode target.
     Map,
-    /// `counter`: an `i64` scalar.
     Scalar,
-    /// `last`/`once`: a raw value whose interior shape the schema does not know.
     Opaque,
 }
 
 impl FieldShape {
-    /// The shape a compiled field node exposes to the transformer.
     fn of(field: &FieldProg) -> Self {
         match field {
             FieldProg::LatestBy { .. } => Self::Envelope,
@@ -41,25 +28,15 @@ impl FieldShape {
 /// The schema disproves this reference — always a boot error.
 #[derive(Clone, Copy)]
 enum ContradictReason {
-    /// Root field is not in the schema.
     UnknownField,
-    /// Reaching past a scalar (a `counter`, or an envelope `comparator`) which has no sub-fields.
     ScalarSubfield,
-    /// An envelope's second segment is neither `comparator` nor `payload`.
     BadEnvelopeKey,
-    /// `each` used outside an `explode` stream.
     EachOutsideExplode,
-    /// A path rooted at neither `state` nor `each`.
     UnrootedPath,
-    /// `$` (whole-record) — resolves to null in a transformer; an author error.
     RootInTransform,
-    /// `latest`/`first`/`list` over something that is not a `state.<keyed_map>` path.
     ReduceNotMap,
-    /// A `get`/`lookup` argument that must be a string literal but is a dynamic expression.
     DynamicBuiltinArg,
-    /// A `lookup` table name absent from the enrichment join-map.
     UnknownEnrichmentTable,
-    /// `get`-by-key on a `list()` result (an array) — string-key navigation always resolves to null.
     GetOnList,
 }
 
@@ -95,10 +72,9 @@ impl ContradictReason {
 /// Provable but almost certainly a mistake — a boot error, reported distinctly from a contradiction.
 #[derive(Clone, Copy)]
 enum LintReason {
-    /// A literal key into a `keyed_map` (a dynamic map); use `latest`/`first`/`list` or `explode`.
     LiteralMapKey,
-    /// `lookup` (enrichment) in a gate: the verdict is recomputed for the OLD state on later
-    /// transitions, so a hot-reload flip would strand the emitted row (never retracted).
+    /// `lookup` in a gate: the verdict is recomputed for the OLD state on later transitions, so a
+    /// reload flip would strand the emitted row.
     EnrichmentDependentGate,
 }
 
@@ -118,9 +94,7 @@ impl LintReason {
 /// Valid up to the frontier; the interior is foreign JSON trusted by convention (not a boot error).
 #[derive(Clone, Copy)]
 enum OpaqueReason {
-    /// Reaching into a `latest_by`/`keyed_map` `payload` (a foreign event stored as-sent).
     PayloadInterior,
-    /// Reaching into a `last`/`once` value whose interior the schema does not know.
     OpaqueFieldInterior,
 }
 

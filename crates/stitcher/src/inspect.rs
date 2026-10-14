@@ -1,7 +1,6 @@
-//! Inspect mode (INSPECT.md): structured `stitcher::inspect` tracing events for incoming
-//! records, old→merged states, and outgoing sink records. PII-redacting by default,
-//! sampleable/key-filtered, and non-destructive under dry-run (fresh consumer group;
-//! nothing written or committed).
+//! Inspect mode: structured `stitcher::inspect` tracing events for incoming records,
+//! old→merged states, and outgoing sink records. PII-redacting by default, sampleable/
+//! key-filtered, and non-destructive under dry-run (nothing written or committed).
 
 use serde::Serialize;
 use serde_json::Value;

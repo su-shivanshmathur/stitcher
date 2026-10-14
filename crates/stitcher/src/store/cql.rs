@@ -1,5 +1,5 @@
-//! CQL backend via the `scylla` driver (covers ScyllaDB and Cassandra, PLAN §3).
-//! Table: `id, id_type, version, state(blob=JSON)`; Quorum consistency (PLAN §13).
+//! CQL backend via the `scylla` driver (ScyllaDB and Cassandra).
+//! Table: `id, id_type, version, state(blob=JSON)`; Quorum consistency.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -32,10 +32,9 @@ fn validate_ident(kind: &str, ident: &str) -> StitcherResult<()> {
     }
 }
 
-/// Config-driven peer-address rewriting ([`config::CqlCfg::address_translation`]):
-/// translate addresses advertised by discovered nodes into locally reachable ones;
-/// unmapped peers pass through untouched (real clusters need no rules). For
-/// port-forwarded/NAT'd nodes that advertise an unreachable internal IP.
+/// Config-driven peer-address rewriting ([`config::CqlCfg::address_translation`]) for
+/// port-forwarded/NAT'd nodes that advertise an unreachable internal IP; unmapped peers
+/// pass through untouched.
 struct PeerAddressMap(HashMap<SocketAddr, SocketAddr>);
 
 #[async_trait::async_trait]
@@ -74,7 +73,7 @@ impl CqlStore {
         validate_ident("keyspace", &cfg.keyspace)?;
         validate_ident("table", &cfg.table)?;
 
-        // Wire-level compression only; stored blobs remain raw JSON (PLAN §13).
+        // Wire-level compression only; stored blobs remain raw JSON.
         let mut builder = SessionBuilder::new().compression(Some(Compression::Lz4));
         for host in &cfg.hosts {
             builder = builder.known_node(format!("{}:{}", host, cfg.port));

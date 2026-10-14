@@ -1,4 +1,4 @@
-//! The `Store` abstraction + composed local/remote implementation (PLAN §Core abstractions).
+//! The `Store` abstraction + composed local/remote implementation.
 
 use std::{collections::HashMap, future::Future, sync::Arc};
 
@@ -29,8 +29,8 @@ pub enum RebalanceEvent {
     Revoke(Vec<PartitionRef>),
 }
 
-/// Read-modify-write state store. Values are `(version, json-bytes)`; framing details are a
-/// backend concern (`RocksDB`: 8-byte LE header, CQL: version column) (PLAN §13).
+/// Read-modify-write state store. Values are `(version, json-bytes)`; framing is a backend
+/// concern (`RocksDB`: 8-byte LE header, CQL: version column).
 #[async_trait::async_trait]
 pub trait Store: Send + Sync {
     /// Fetch states for `keys`; absent keys are simply not in the map.
@@ -63,11 +63,10 @@ pub trait Store: Send + Sync {
     async fn cleanup(&self) -> StitcherResult<()>;
 }
 
-/// Execute a store operation, *then* log it — one shared site for every backend
-/// (cql, rocksdb, …): the caller's debug line and the duration metric fire only
-/// after the future resolves successfully, so a log line proves the work
-/// finished (a pre-operation log cannot). Failures propagate undecorated; the
-/// backend's error context already names the operation.
+/// Execute a store operation, *then* log it — one shared site for every backend. The
+/// debug line and duration metric fire only after the future resolves, so a log line
+/// proves the work finished. Failures propagate undecorated (the backend's context
+/// already names the operation).
 pub(crate) async fn traced<T, F, L>(
     backend: &'static str,
     metric: fn(&'static str, f64),
@@ -88,7 +87,7 @@ where
     result
 }
 
-/// Local-first cache + authoritative remote (PLAN §5: read local-first, write-through both).
+/// Local-first cache + authoritative remote (read local-first, write-through both).
 pub struct ComposedStore<L: Store, R: Store> {
     /// Local cache (`RocksDB`).
     pub local: L,
@@ -99,9 +98,9 @@ pub struct ComposedStore<L: Store, R: Store> {
 }
 
 impl<L: Store, R: Store> ComposedStore<L, R> {
-    /// Fan out per-key remote puts with bounded concurrency.
-    /// Eagerly materializes futures into a `Vec` so the iterator closure lifetime
-    /// doesn't fight `buffer_unordered`'s `for<'x>` bound inside `async_trait`.
+    /// Fan out per-key remote puts with bounded concurrency. Futures are eagerly
+    /// materialized into a `Vec` so the iterator closure lifetime doesn't fight
+    /// `buffer_unordered`'s `for<'x>` bound inside `async_trait`.
     async fn remote_put_many(
         &self,
         id_type: &str,
@@ -140,7 +139,7 @@ impl<L: Store, R: Store> Store for ComposedStore<L, R> {
     }
 
     async fn put(&self, id_type: &str, key: &Key, version: i64, blob: &[u8]) -> StitcherResult<()> {
-        // dual write; failure of either fails the batch (PLAN §Failure modes)
+        // dual write; failure of either fails the batch
         let ((), ()) = tokio::try_join!(
             self.local.put(id_type, key, version, blob),
             self.remote.put(id_type, key, version, blob)

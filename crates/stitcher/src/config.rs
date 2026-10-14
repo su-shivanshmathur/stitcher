@@ -1,5 +1,5 @@
 //! Settings: `config/<RUN_ENV>.toml` + optional `--config-path` file + `STITCHER__*` env
-//! overrides (PLAN §14); `serde_path_to_error` pinpoints bad fields.
+//! overrides; `serde_path_to_error` pinpoints bad fields.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -24,9 +24,8 @@ pub struct Cli {
     #[arg(long = "config-path", value_name = "FILE")]
     pub config_path: Option<PathBuf>,
 
-    /// Inspect mode (INSPECT.md): print incoming records, old→merged states and
-    /// outgoing sink records; write/produce/commit NOTHING (fresh consumer group;
-    /// safe to re-run).
+    /// Inspect mode: print incoming records, old→merged states and outgoing sink records;
+    /// write/produce/commit NOTHING (fresh consumer group; safe to re-run).
     #[arg(long)]
     pub inspect: bool,
 }
@@ -35,7 +34,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Validate a `transformer.toml` against a `state.yaml` and exit — the boot-time
-    /// `state ⊇ transformer` check, runnable in CI (no Kafka, no store).
+    /// `state ⊇ transformer` check, runnable in CI.
     CheckTransformer {
         /// Path to the state schema (`state.yaml`).
         #[arg(long = "state", value_name = "FILE")]
@@ -65,23 +64,20 @@ pub struct Settings {
     pub batch: Batch,
     /// State store(s).
     pub store: StoreCfg,
-    /// State-machine config for the generic binary (`state.yaml`, lantern #37).
+    /// State-machine config for the generic binary (`state.yaml`).
     pub state: Option<StateCfg>,
-    /// Config-driven output transformer (`transformer.toml`); absent ⇒ the
-    /// processor's passthrough `encode` is used.
+    /// Config-driven output transformer (`transformer.toml`); absent ⇒ passthrough `encode`.
     pub transform: TransformCfg,
     /// Enrichment join-map reload.
     pub enrichment: Enrichment,
     /// Tenant allow-list (== `--tenant-id`).
     pub tenant_ids: Vec<String>,
-    /// Inspect mode (dev/staging introspection; INSPECT.md).
+    /// Inspect mode (dev/staging introspection).
     pub debug: DebugCfg,
-    /// Cap (seconds) on processing the final in-flight batch during shutdown. `None` =
-    /// unbounded, which lets a slow final batch run past the orchestrator's kill deadline
-    /// (k8s `terminationGracePeriodSeconds`, ~30s) and get SIGKILL'd mid-flush. Keep this
-    /// below that deadline *minus* the producer flush budget (~10s, see `pipeline`): on
-    /// timeout the batch aborts pre-commit and replays on restart (at-least-once), which is
-    /// safer than a mid-write kill. Defaults to `Some(20)`.
+    /// Cap (seconds) on processing the final in-flight batch during shutdown. Keep below
+    /// the orchestrator's kill deadline (k8s `terminationGracePeriodSeconds`, ~30s) minus
+    /// the producer flush budget: on timeout the batch aborts pre-commit and replays on
+    /// restart (at-least-once) — safer than a SIGKILL mid-write. `None` = unbounded.
     pub shutdown_grace_secs: Option<u64>,
     /// Max concurrent remote reads within a batch.
     pub read_concurrency: usize,
@@ -97,9 +93,8 @@ pub struct Server {
     pub host: String,
     /// Bind port (== `--prometheus-port`).
     pub port: u16,
-    /// Admin API key gating `GET /state` (raw session PII), sent by the client in the
-    /// `api-key` header. Unset ⇒ `/state` rejects every request (401); the endpoint only
-    /// serves data once a key is configured (mirrors hyperswitch's `AdminApiAuth`).
+    /// Admin API key gating `GET /state` (raw session PII), sent as the `api-key` header.
+    /// Unset ⇒ `/state` rejects every request (401).
     pub admin_api_key: Option<Secret<String>>,
 }
 
@@ -161,12 +156,10 @@ pub struct SourceKafka {
     pub topics: Vec<String>,
     /// Consumer group id (== `--consumer-group-id`).
     pub consumer_group: String,
-    /// Where a group without committed offsets starts: `"earliest"` (replay
-    /// the log) or `"latest"` (only new records); passed through to
-    /// `auto.offset.reset`.
+    /// Where a group without committed offsets starts: `"earliest"` or `"latest"`
+    /// (passed to `auto.offset.reset`).
     pub auto_offset_reset: String,
-    /// librdkafka statistics interval in ms (feeds the consumer-lag gauges);
-    /// `0` disables.
+    /// librdkafka statistics interval in ms (feeds the consumer-lag gauges); `0` disables.
     pub statistics_interval_ms: u64,
     /// Extra librdkafka consumer properties (e.g. `partition.assignment.strategy`).
     pub extra: KafkaExtra,
@@ -180,7 +173,7 @@ pub struct SinkKafka {
     pub brokers: Vec<String>,
     /// Extra librdkafka producer properties.
     pub extra: KafkaExtra,
-    /// Dead-letter topic for malformed records (PLAN §23).
+    /// Dead-letter topic for malformed records.
     pub dlq_topic: String,
     /// Delivery timeout per record, seconds.
     pub delivery_timeout_secs: u64,
@@ -235,7 +228,6 @@ pub struct CqlCfg {
     pub password: Option<Secret<String>>,
     /// Rewrite discovered peer addresses — for nodes behind a port-forward/NAT that
     /// advertise an unreachable IP (e.g. `"10.89.0.10:9042" = "127.0.0.1:9042"`).
-    /// Unmapped peers pass through untouched; empty = no translation.
     pub address_translation: HashMap<String, String>,
 }
 
@@ -275,9 +267,8 @@ pub struct Enrichment {
     pub reload_secs: u64,
 }
 
-/// Inspect mode (`stitcher/INSPECT.md`): dev/staging introspection aid. Off by default;
-/// `--inspect` is a shorthand for `print_incoming = print_state = print_outgoing =
-/// dry_run = true`.
+/// Inspect mode: dev/staging introspection. `--inspect` is a shorthand for
+/// `print_incoming = print_state = print_outgoing = dry_run = true`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DebugCfg {
@@ -451,13 +442,11 @@ impl Default for Enrichment {
 impl Settings {
     /// Structural validation after layering; messages are specific and actionable.
     pub fn validate(&self) -> StitcherResult<()> {
-        // A single-variant enum today; this binding breaks the build if a backend is added,
-        // forcing the checks below to be revisited.
+        // single-variant enum; this binding breaks the build if a backend is added
         let Backend::Cql = self.store.backend;
 
-        // (failed?, message) in precedence order; the first failing check wins. An empty
-        // admin_api_key is rejected so an empty `api-key` header can never pass (`None`
-        // stays the only "no key configured" state).
+        // first failing check wins; an empty admin_api_key is rejected so an empty
+        // `api-key` header can never pass
         let checks = [
             (
                 self.source_kafka.brokers.is_empty(),

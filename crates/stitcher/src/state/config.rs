@@ -1,5 +1,5 @@
-//! `state.yaml` loading + ahead-of-time compilation (parse DSL strings once at boot,
-//! lantern #37 (pe)): the [`Program`] is everything [`super::interp`] needs at runtime.
+//! `state.yaml` loading + ahead-of-time compilation: the [`Program`] is everything
+//! [`super::interp`] needs at runtime.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,30 +15,24 @@ use crate::errors::{StitcherError, StitcherResult};
 pub enum KeySeg {
     /// Literal text between `{…}` holes.
     Literal(String),
-    /// A `{log.path}` hole; alternatives separated by `|` inside the hole
-    /// (`{log.payment_id|log.payment_intent_id}`) resolve to the first
-    /// present value — for identity components that live at different paths
-    /// across event types. All alternatives missing (or non-string) drops
-    /// the record (== `_primaryKey`).
+    /// A `{log.path}` hole; `|`-separated alternatives resolve to the first present value
+    /// (identity components that live at different paths across event types). All
+    /// alternatives missing (or non-string) drops the record.
     Path(Vec<String>),
 }
 
-/// Record admission filter (== `_decodeLog`), compiled.
+/// Record admission filter, compiled.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilterProg {
-    /// Required non-empty paths; each entry carries `|`-separated alternatives
-    /// (any one present satisfies the requirement).
+    /// Required non-empty paths; `|`-alternatives per entry, any one present satisfies.
     pub require: Vec<Vec<String>>,
-    /// Reject records whose required string fields contain this substring (checked while
-    /// iterating `require`; inert when `require` is empty).
+    /// Reject records whose required string fields contain this substring.
     pub reject_if_contains: Option<String>,
     /// Allowed `log_type` values (empty = no check).
     pub log_type_in: Vec<String>,
-    /// Paths the `log_type` value is read from; `|`-alternatives resolve to the
-    /// first present (a lifecycle event carries `log_type`, an API event `api_flow`).
+    /// Paths the `log_type` value is read from; `|`-alternatives, first present wins.
     pub log_type_path: Vec<String>,
-    /// Tenant id paths (first-present-wins across `|`-alternatives, for event
-    /// types that carry the tenant at different paths).
+    /// Tenant id paths; `|`-alternatives, first present wins.
     pub tenant_path: Vec<String>,
 }
 
@@ -129,8 +123,8 @@ pub fn compile(schema: &model::Schema) -> Result<Program, String> {
     if schema.aggregate.is_empty() {
         return Err(err("aggregate name must be non-empty".into()));
     }
-    // A `|`-separated string → its trimmed, non-empty alternatives (first-present-wins
-    // at admission/keying). Shared by `require`, `log_type_path` and `tenant_path`.
+    // `|`-separated string → trimmed, non-empty alternatives (first-present-wins at
+    // admission/keying); shared by `require`, `log_type_path` and `tenant_path`.
     let split_alts = |src: &str| -> Vec<String> {
         src.split('|')
             .map(str::trim)
@@ -245,9 +239,8 @@ fn compile_payload(payload: &Option<String>) -> Result<Expr, String> {
     }
 }
 
-/// `"{log.a}-{log.b}"` → key-template segments (an unbalanced `{` is treated as a literal).
-/// An empty hole (`{}` or `{ | }`) is a compile error: it would produce a path segment with no
-/// alternatives, which always fails at key time and silently drops every record.
+/// `"{log.a}-{log.b}"` → key-template segments (an unbalanced `{` is a literal). An empty
+/// hole (`{}` or `{ | }`) is a compile error: it would silently drop every record at key time.
 fn compile_key(template: &str) -> Result<Vec<KeySeg>, String> {
     let mut segments = Vec::new();
     let mut rest = template;
