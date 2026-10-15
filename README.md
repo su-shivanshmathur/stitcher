@@ -11,7 +11,7 @@
 
 **stitcher** folds a Kafka stream of differently-shaped events into one durable record per key — a *session* — and emits a change-delta each time that record updates. It's **CQRS over a stream**: every event is a fact folded into a per-key aggregate (the write model), and a projection derives downstream rows from it (the read model).
 
-The example (`config/intent.yaml`) sessionizes a payment — intent, attempts, refunds, API and connector logs, all **different schemas on one topic** — into one record keyed by `payment_id-merchant_id`. The binary needs **no domain code**: a run is `config/<RUN_ENV>.toml` + a state schema + an output map.
+The example (`config/state.yaml`) sessionizes a device — its profile, sensor readings, status changes, alerts, and flat command events, all **different schemas on one topic** — into one record keyed by `device_id-site_id`. The binary needs **no domain code**: a run is `config/<RUN_ENV>.toml` + a state schema + an output map.
 
 ## Quickstart
 
@@ -68,20 +68,20 @@ A YAML schema compiles into a `Program` the interpreter runs. It declares **admi
 (what counts as state), **keying**, and **fields** (how state is built):
 
 ```yaml
-primary_key: "{payment_id|log.payment_id}-{merchant_id|log.merchant_id}"
+primary_key: "{device_id|log.device_id}-{site_id|log.site_id}"
 decode_filter:
   log_type_path: "log_type|api_flow|flow"   # discriminator: first path present wins
 fields:
-  payment_intent:                            # body under `log`
+  device_profile:                            # body under `log`
     node: latest_by
-    when: "log_type == 'payment_intent'"
+    when: "log_type == 'device_profile'"
     comparator: "parse_time(log.modified_at)"
     payload: "log"
-  api_event_object:                          # different domain, FLAT — payload defaults to `$`
+  command_event_object:                      # different domain, FLAT — payload defaults to `$`
     node: keyed_map
-    when: "api_flow == 'PaymentsCreate'"
+    when: "api_flow == 'ProvisionDevice'"
     key: "meaningful(created_at_timestamp)"
-  log_count: { node: counter }
+  event_count: { node: counter }
 ```
 
 The `a|b|c` **alternation** is the join mechanism — *"tell it where to find the value"* — so

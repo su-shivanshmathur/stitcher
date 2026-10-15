@@ -1,59 +1,59 @@
 # The generic `stitcher` binary's state machine: interpreted at runtime by
 # `stitcher::state` (also consumable by the `schema!` build-time escape hatch).
-aggregate: intent
+aggregate: device
 version: 3
-id_type: payment_merchant
+id_type: device_site
 # The key holes must mirror the `require` alternations: a record admitted via
-# `log.payment_id` must also key via `log.payment_id` (first-present-wins is
+# `log.device_id` must also key via `log.device_id` (first-present-wins is
 # per hole, so unmatched coverage drops records at keying after passing
 # admission).
-primary_key: "{payment_id|log.payment_id}-{merchant_id|log.merchant_id}"
+primary_key: "{device_id|log.device_id}-{site_id|log.site_id}"
 decode_filter:
-  require: [payment_id|log.payment_id, merchant_id|log.merchant_id]
+  require: [device_id|log.device_id, site_id|log.site_id]
   reject_if_contains: undefined
   # discriminator read first-present-wins: lifecycle events carry `log_type`,
-  # API events carry `api_flow` — both feed the same payment session.
-  log_type_in: [payment_intent, payment_attempt, refund, dispute, PaymentsCreate, Authorize]
+  # command events carry `api_flow` — both feed the same device session.
+  log_type_in: [device_profile, reading, status_change, alert, ProvisionDevice, Reboot]
   log_type_path: "log_type|api_flow|flow"
-  # tenant sits under `log` on lifecycle events, top-level on API events.
-  tenant_path: "log.tenant_id|tenant_id"
+  # org sits under `log` on lifecycle events, top-level on command events.
+  tenant_path: "log.org_id|org_id"
 fields:
-  payment_intent:
+  device_profile:
     node: latest_by
-    when: "log_type == 'payment_intent'"
+    when: "log_type == 'device_profile'"
     comparator: "parse_time(log.modified_at)"
     payload: "log"
-  payment_attempt_object:
+  reading_object:
     node: keyed_map
-    when: "log_type == 'payment_attempt'"
-    key: "meaningful(log.attempt_id)"
+    when: "log_type == 'reading'"
+    key: "meaningful(log.reading_id)"
     value:
       node: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
-  refund_object:
+  status_change_object:
     node: keyed_map
-    when: "log_type == 'refund'"
-    key: "meaningful(log.refund_id)"
+    when: "log_type == 'status_change'"
+    key: "meaningful(log.change_id)"
     value:
       node: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
-  dispute_object:
+  alert_object:
     node: keyed_map
-    when: "log_type == 'dispute'"
-    key: "meaningful(log.dispute_id)"
+    when: "log_type == 'alert'"
+    key: "meaningful(log.alert_id)"
     value:
       node: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
-  api_event_object:
+  command_event_object:
     node: keyed_map
-    when: "api_flow == 'PaymentsCreate' || flow == 'Authorize'"
+    when: "api_flow == 'ProvisionDevice' || flow == 'Reboot'"
     key: "meaningful(created_at_timestamp)"
     value:
       node: latest_by
       comparator: "parse_time(created_at_timestamp)"
       # payload omitted ⇒ defaults to `$` (the whole event, stored as sent)
-  log_count:
+  event_count:
     node: counter
