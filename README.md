@@ -47,7 +47,8 @@ request/response schema: [`docs/openapi.yaml`](docs/openapi.yaml).
 ## How it works
 
 **Ordering invariant: produce → persist → commit** (at-least-once; safe on replay because
-every merge is a commutative monoid).
+every merge is idempotent — re-folding a batch onto already-persisted state is a no-op. The
+exception is `counter` (sum), which can over-count under replay).
 
 ```mermaid
 flowchart LR

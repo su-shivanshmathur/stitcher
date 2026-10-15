@@ -44,23 +44,30 @@ flowchart TD
     D -->|"Some (key,state)"| FOLD["fold by key:<br/>old.merge(state)  (Merge::merge)"]
   end
 
-  subgraph PB3["process_batch — per key"]
+  subgraph PB3["process_batch — per key (accumulate)"]
     GM["store.get_many(id_type, keys)<br/>ComposedStore: Rocks → Cql"]
     GM --> DS["proc.decode_stored(blob)  (version == state_version)<br/>else proc.upcast(version, blob)"]
-    DS -->|had stored| MIN["ctx.projection.project(old, Sign::Minus)"]
-    MIN --> MG["old.merge(local)  (Merge::merge)"]
-    DS -->|first time| MG
-    MG --> PLUS["ctx.projection.project(merged, Sign::Plus)"]
-    PLUS --> SEND["ctx.producer.send_all(msgs)  → sink topics"]
-    SEND --> PUT["store.put(id_type, key, version, blob, part)<br/>ComposedStore: Rocks + Cql (try_join)"]
+    DS --> OLD["capture old_value (the retract leg) BEFORE merge<br/>None on first sight"]
+    OLD --> MG["merged = old.merge(local)  (Merge::merge)<br/>(local alone if first time)"]
+    MG --> PT["ctx.projection.project_transition(old_value, merged_value, ctx)<br/>ONE call: retract old + emit new, paired per row"]
+    PT --> ACC["msgs.extend(…) · states_to_persist.push(key, blob)"]
+  end
+
+  subgraph PB4["process_batch — ONCE per batch, after the key loop"]
+    SEND["ctx.producer.send_all(msgs)  → sink topics"]
+    SEND --> PUT["store.put_many(id_type, states_to_persist, version)<br/>ComposedStore: Rocks + Cql (try_join)"]
   end
 
   PB --> D
   FOLD --> GM
+  ACC --> SEND
 ```
 
-**Ordering invariant:** `send_all` (produce) → `store.put` (persist) → `consumer.commit`
-(offsets). At-least-once; safe on replay because every merge is a commutative monoid.
+**Ordering invariant:** `send_all` (produce) → `store.put_many` (persist) → `consumer.commit`
+(offsets). At-least-once; safe on replay because every merge is **idempotent** — a replayed
+batch re-folds its contribution onto already-persisted state as a no-op (`latest_by` re-picks
+the same winner, `once`/`last` re-write the same value). The exception is `counter` (sum),
+which is a commutative monoid but *not* idempotent, so it can over-count under replay.
 
 ## Consume → micro-batch (what node `C` expands to)
 
@@ -166,9 +173,9 @@ serve it. This is a data-flow guard, not authorization.
 | fold within batch | `Merge::merge` (`MergeValue`) | `crates/stitcher/src/merge.rs` |
 | read stored state | `Store::get_many` (`ComposedStore` → `RocksStore`, `CqlStore`) | `crates/stitcher/src/store/{mod,rocks,cql}.rs` |
 | decode stored / migrate | `Processor::decode_stored` / `Processor::upcast` | `state/interp.rs`, `processor.rs` |
-| project deltas | `Projection::project(state, Sign, ctx)` (`Transform` or `StateLogger`) | `crates/transformer/src/engine.rs` |
+| project deltas | `Projection::project_transition(old, new, ctx)` (`Transform` or `StateLogger`) | `crates/transformer/src/engine.rs` |
 | produce | `KafkaProducer::send_all` / `send_dlq` | `crates/stitcher/src/kafka/producer.rs` |
-| persist | `Store::put` (`ComposedStore` → Rocks + Cql via `try_join`) | `crates/stitcher/src/store/mod.rs` |
+| persist | `Store::put_many` (`ComposedStore` → Rocks + Cql via `try_join`) | `crates/stitcher/src/store/mod.rs` |
 | commit | `KafkaConsumer::commit` | `crates/stitcher/src/kafka/consumer.rs` |
 | malformed → DLQ | `classify_and_route` → `KafkaProducer::send_dlq` | `crates/stitcher/src/pipeline.rs` |
 | ops server spawn | `server::spawn` (shares the pipeline's `Arc<dyn Store>`) | `crates/stitcher/src/server.rs` |
@@ -190,5 +197,5 @@ to the same key `pay_DEMO001-mer_DEMO`, then `build_field` routes it by its `whe
 - `flow=='Authorize'` (flat) → `connector_event_object`, same `$` default.
 - every record → `log_count` `counter` (+1 ⇒ 6).
 
-All six merge into one `MergeValue::Map`, `store.put` writes it to RocksDB + Cassandra, and
-offsets commit.
+All six merge into one `MergeValue::Map`, `store.put_many` writes it to RocksDB + Cassandra,
+and offsets commit.
