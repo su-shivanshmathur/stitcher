@@ -1,38 +1,38 @@
-# Output transformer for the `intent` state (config/intent.yaml) → N Kafka topics.
+# Output transformer for the `device` state (config/state.yaml) → N Kafka topics.
 # Runtime, versioned, loaded once at boot; a change here is applied on restart
 # (no hot-reload). Wired via `[transform] config_file` in the env config.
 version = 1
 
-# intent: one row per payment, enriched with the LATEST attempt's connector.
+# device: one row per device, enriched with the LATEST reading's sensor.
 [[stream]]
-name = "intent"
-topic = "stitcher-intent-events"
+name = "device"
+topic = "stitcher-device-events"
 sign_flag = true
-gate = "state.payment_intent.payload != null"          # == isStateProper
-retention = { days = 182, key = "created_at" }          # created_at is top-level ⇒ fires
-key = "state.payment_intent.payload.payment_id"
+gate = "state.device_profile.payload != null"          # == isStateProper
+retention = { days = 182, key = "registered_at" }       # registered_at is top-level ⇒ fires
+key = "state.device_profile.payload.device_id"
 [stream.fields]
-payment_id  = "meaningful(state.payment_intent.payload.payment_id)"
-merchant_id = "meaningful(state.payment_intent.payload.merchant_id)"
-amount      = "round(state.payment_intent.payload.amount)"
-created_at  = "state.payment_intent.payload.created_at"
-log_count   = "state.log_count"
-connector   = "get(latest(state.payment_attempt_object), 'connector')"   # cross-entity reduce
-attempts    = "list(state.payment_attempt_object)"
+device_id    = "meaningful(state.device_profile.payload.device_id)"
+site_id      = "meaningful(state.device_profile.payload.site_id)"
+firmware     = "state.device_profile.payload.firmware_version"
+registered_at = "state.device_profile.payload.registered_at"
+event_count  = "state.event_count"
+last_sensor  = "get(latest(state.reading_object), 'sensor')"   # cross-entity reduce
+readings     = "list(state.reading_object)"
 
-# attempt: one row per attempt (explode the map) + intent-level common fields.
+# reading: one row per reading (explode the map) + device-level common fields.
 [[stream]]
-name = "attempt"
-topic = "stitcher-attempt-events"
+name = "reading"
+topic = "stitcher-reading-events"
 sign_flag = true
-retention = { days = 182, key = "created_at" }
-explode = "state.payment_attempt_object"
-key = "each.payload.attempt_id"
+retention = { days = 182, key = "recorded_at" }
+explode = "state.reading_object"
+key = "each.payload.reading_id"
 [stream.common]
-payment_id  = "state.payment_intent.payload.payment_id"
-merchant_id = "state.payment_intent.payload.merchant_id"
+device_id = "state.device_profile.payload.device_id"
+site_id   = "state.device_profile.payload.site_id"
 [stream.element]
-attempt_id = "meaningful(each.payload.attempt_id)"
-connector  = "meaningful(each.payload.connector)"
-amount     = "round(each.payload.amount)"
-created_at = "each.payload.created_at"
+reading_id = "meaningful(each.payload.reading_id)"
+sensor     = "meaningful(each.payload.sensor)"
+value      = "round(each.payload.value)"
+recorded_at = "each.payload.recorded_at"

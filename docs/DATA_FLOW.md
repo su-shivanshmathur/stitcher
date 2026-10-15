@@ -185,17 +185,18 @@ serve it. This is a data-flow guard, not authorization.
 
 ## Worked example (the six demo events)
 
-For `pay_DEMO001` (see the README), each record flows `decode_with_key → admit → key_of`
-to the same key `pay_DEMO001-mer_DEMO`, then `build_field` routes it by its `when`:
+For `dev_DEMO001` (see the README), each record flows `decode_with_key → admit → key_of`
+to the same key `dev_DEMO001-site_DEMO`, then `build_field` routes it by its `when`:
 
-- `log_type=='payment_intent'` (×2) → `payment_intent` `latest_by`; the second (later
+- `log_type=='device_profile'` (×2) → `device_profile` `latest_by`; the second (later
   `modified_at`) wins under `Merge::merge`.
-- `log_type=='payment_attempt'` → `payment_attempt_object` `keyed_map[att_A]`.
-- `log_type=='refund'` → `refund_object` `keyed_map[ref_A]`.
-- `api_flow=='PaymentsCreate'` (flat) → `api_event_object`; `payload` omitted ⇒ `Expr::Root`
+- `log_type=='reading'` → `reading_object` `keyed_map[rd_A]`.
+- `log_type=='status_change'` → `status_change_object` `keyed_map[sc_A]`.
+- `api_flow=='ProvisionDevice'` (flat) → `command_event_object`; `payload` omitted ⇒ `Expr::Root`
   ⇒ `RecordScope::root()` stores the whole event.
-- `flow=='Authorize'` (flat) → `connector_event_object`, same `$` default.
-- every record → `log_count` `counter` (+1 ⇒ 6).
+- `flow=='Reboot'` (flat) → the same `command_event_object` (both flat flows co-key via the
+  `||` alternation), same `$` default.
+- every record → `event_count` `counter` (+1 ⇒ 6).
 
 All six merge into one `MergeValue::Map`, `store.put_many` writes it to RocksDB + Cassandra,
 and offsets commit.

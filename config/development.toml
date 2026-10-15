@@ -46,7 +46,7 @@ ttl_secs = 0
 
 # The generic `stitcher` binary's state machine (ignored by domain binaries).
 [state]
-config_file = "config/intent.yaml"
+config_file = "config/state.yaml"
 
 # Output transformer (state → N topics: project/derive/reduce/explode + retention).
 # Comment out to fall back to the processor's passthrough `encode`.
