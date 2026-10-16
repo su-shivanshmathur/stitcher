@@ -109,6 +109,41 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
                 _ => Value::Null,
             }
         }
+        (Builtin::ParseJson, [arg]) => builtins::parse_json(&eval(arg, cx)),
+        (Builtin::Count, [arg]) => builtins::count_collection(&eval(arg, cx)),
+        (Builtin::If, [cond, then_expr, else_expr]) => {
+            if builtins::truthy(&eval(cond, cx)) {
+                eval(then_expr, cx).into_owned()
+            } else {
+                eval(else_expr, cx).into_owned()
+            }
+        }
+        (Builtin::Sum, [coll, field]) => {
+            let c = eval(coll, cx);
+            let f = eval(field, cx);
+            f.as_str()
+                .map_or(Value::Null, |field| builtins::sum_field(&c, field))
+        }
+        (Builtin::Filter, [coll, field, want]) => {
+            let c = eval(coll, cx);
+            let f = eval(field, cx);
+            let w = eval(want, cx);
+            f.as_str().map_or(Value::Null, |field| {
+                builtins::filter_collection(&c, field, &w)
+            })
+        }
+        (Builtin::Min, [coll, field]) => {
+            let c = eval(coll, cx);
+            let f = eval(field, cx);
+            f.as_str()
+                .map_or(Value::Null, |field| builtins::min_field(&c, field))
+        }
+        (Builtin::Max, [coll, field]) => {
+            let c = eval(coll, cx);
+            let f = eval(field, cx);
+            f.as_str()
+                .map_or(Value::Null, |field| builtins::max_field(&c, field))
+        }
         // arity is checked at compile/load time
         _ => Value::Null,
     }
