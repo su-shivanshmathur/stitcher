@@ -278,9 +278,23 @@ fn call_findings(
     tables: Option<&[String]>,
 ) -> Vec<Finding> {
     match builtin {
-        Builtin::Latest | Builtin::First | Builtin::List => {
-            reduce_findings(args, exploding, program)
-        }
+        Builtin::List => reduce_findings(args, exploding, program),
+        Builtin::Latest | Builtin::First => match args {
+            [_single] => reduce_findings(args, exploding, program),
+            [coll, field] => {
+                let field_error = (!matches!(field, Expr::Str(_))).then(|| {
+                    Finding::new(
+                        FindingContext::FieldArg,
+                        Verdict::Contradicted(ContradictReason::DynamicBuiltinArg),
+                    )
+                });
+                collection_arg_findings(coll, exploding, program, tables)
+                    .into_iter()
+                    .chain(field_error)
+                    .collect()
+            }
+            _ => Vec::new(),
+        },
         Builtin::Get => get_findings(args, exploding, program, tables),
         Builtin::Lookup => lookup_findings(args, exploding, program, tables),
         Builtin::Count => match args {

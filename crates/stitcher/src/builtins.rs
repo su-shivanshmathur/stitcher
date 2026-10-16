@@ -207,6 +207,39 @@ fn reduce_by_comparator(map: &Value, want_max: bool) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Rank entries by numeric `field`; return the winning `(payload, field_value)`.
+/// Non-numeric field values are skipped; ties keep the incumbent; `None` when empty / no numeric match.
+/// One `get_field` walk per item (incumbent's field value cached); borrows from `coll`.
+fn rank_by_field<'a>(coll: &'a Value, field: &str, want_max: bool) -> Option<(&'a Value, Value)> {
+    let mut best: Option<(&Value, Value)> = None;
+    for item in iter_payloads(coll) {
+        let field_value = get_field(item, field);
+        if value_as_f64(&field_value).is_none() {
+            continue;
+        }
+        let take = match &best {
+            None => true,
+            Some((_, incumbent)) => match cmp_num(&field_value, incumbent) {
+                Some(std::cmp::Ordering::Greater) => want_max,
+                Some(std::cmp::Ordering::Less) => !want_max,
+                _ => false,
+            },
+        };
+        if take {
+            best = Some((item, field_value));
+        }
+    }
+    best
+}
+
+/// `latest(map, field)` / `first(map, field)`: payload of the entry whose `field` is greatest
+/// (`want_max=true`) or least (`want_max=false`). Non-numeric field values are skipped; ties keep
+/// the incumbent (same policy as [`rank_by_field`]). `Null` when empty or no numeric match.
+#[must_use]
+pub fn pick_by_field(coll: &Value, field: &str, want_max: bool) -> Value {
+    rank_by_field(coll, field, want_max).map_or(Value::Null, |(item, _)| item.clone())
+}
+
 /// Every entry's `payload` (or the entry itself for plain objects); array items as-is; else empty.
 /// Delegates to `iter_payloads` so `list(x)` and direct collection use produce identical payloads.
 #[must_use]
@@ -324,39 +357,16 @@ fn cmp_num(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// Pick best entry by exact numeric ordering; return the original value (exact type/precision).
-fn reduce_field(coll: &Value, field: &str, want_max: bool) -> Value {
-    let mut best: Option<Value> = None;
-    for item in iter_payloads(coll) {
-        let field_value = get_field(item, field);
-        if value_as_f64(&field_value).is_none() {
-            continue;
-        }
-        let take = match &best {
-            None => true,
-            Some(incumbent) => match cmp_num(&field_value, incumbent) {
-                Some(std::cmp::Ordering::Greater) => want_max,
-                Some(std::cmp::Ordering::Less) => !want_max,
-                _ => false,
-            },
-        };
-        if take {
-            best = Some(field_value);
-        }
-    }
-    best.unwrap_or(Value::Null)
-}
-
-/// `min(coll, field)`: item with the least numeric field; empty or no numeric field ⇒ `Null`.
+/// `min(coll, field)`: least numeric field over the collection; empty or no numeric field ⇒ `Null`.
 /// Returns the original value at exact type/precision.
 #[must_use]
 pub fn min_field(coll: &Value, field: &str) -> Value {
-    reduce_field(coll, field, false)
+    rank_by_field(coll, field, false).map_or(Value::Null, |(_, field_value)| field_value)
 }
 
-/// `max(coll, field)`: item with the greatest numeric field; empty or no numeric field ⇒ `Null`.
+/// `max(coll, field)`: greatest numeric field over the collection; empty or no numeric field ⇒ `Null`.
 /// Returns the original value at exact type/precision.
 #[must_use]
 pub fn max_field(coll: &Value, field: &str) -> Value {
-    reduce_field(coll, field, true)
+    rank_by_field(coll, field, true).map_or(Value::Null, |(_, field_value)| field_value)
 }

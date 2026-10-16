@@ -98,9 +98,13 @@ pub enum Builtin {
     Lower,
     /// `coalesce(a, b)`
     Coalesce,
-    /// `latest(map)` — payload of the entry with the greatest stored comparator.
+    /// `latest(map)` or `latest(map, 'field')` — payload of the entry with the greatest stored
+    /// comparator (1-arg) or greatest numeric `field` in the payload (2-arg).
+    /// Note: the 2-arg `field` is read from inside the payload — it is not the envelope's stored
+    /// `comparator`/`payload`; use the 1-arg form to rank by the stored comparator.
     Latest,
-    /// `first(map)` — payload of the entry with the smallest stored comparator.
+    /// `first(map)` or `first(map, 'field')` — payload of the entry with the smallest stored
+    /// comparator (1-arg) or least numeric `field` in the payload (2-arg).
     First,
     /// `list(map)` — array of all entry payloads.
     List,
@@ -181,11 +185,10 @@ impl Builtin {
             | Self::Round
             | Self::Trim
             | Self::Lower
-            | Self::Latest
-            | Self::First
             | Self::List
             | Self::ParseJson
             | Self::Count => Arity::Exact(1),
+            Self::Latest | Self::First => Arity::Range { min: 1, max: 2 },
             Self::Bucket
             | Self::Coalesce
             | Self::Get

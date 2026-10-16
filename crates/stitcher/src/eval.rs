@@ -94,7 +94,21 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             builtins::coalesce(&a, &b).cloned().unwrap_or(Value::Null)
         }
         (Builtin::Latest, [arg]) => builtins::latest(&eval(arg, cx)),
+        (Builtin::Latest, [arg, field]) => {
+            let c = eval(arg, cx);
+            let f = eval(field, cx);
+            f.as_str().map_or(Value::Null, |field| {
+                builtins::pick_by_field(&c, field, true)
+            })
+        }
         (Builtin::First, [arg]) => builtins::first(&eval(arg, cx)),
+        (Builtin::First, [arg, field]) => {
+            let c = eval(arg, cx);
+            let f = eval(field, cx);
+            f.as_str().map_or(Value::Null, |field| {
+                builtins::pick_by_field(&c, field, false)
+            })
+        }
         (Builtin::List, [arg]) => builtins::list(&eval(arg, cx)),
         (Builtin::Get, [value, path]) => {
             let v = eval(value, cx);
