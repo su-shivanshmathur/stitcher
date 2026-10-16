@@ -123,11 +123,12 @@ pub fn truthy(v: &Value) -> bool {
 }
 
 /// Numeric view of a JSON value (for `<`/`<=`/`>`/`>=`).
+/// Strings that parse as non-finite (NaN, inf) are rejected; JSON numbers are always finite.
 #[must_use]
 pub fn value_as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse().ok(),
+        Value::String(s) => s.trim().parse::<f64>().ok().filter(|f| f.is_finite()),
         _ => None,
     }
 }
@@ -206,19 +207,11 @@ fn reduce_by_comparator(map: &Value, want_max: bool) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Every entry's `payload` (or the array as-is); empty array otherwise.
+/// Every entry's `payload` (or the entry itself for plain objects); array items as-is; else empty.
+/// Delegates to `iter_payloads` so `list(x)` and direct collection use produce identical payloads.
 #[must_use]
 pub fn list(collection: &Value) -> Value {
-    match collection {
-        Value::Object(entries) => Value::Array(
-            entries
-                .values()
-                .map(|entry| entry.get("payload").cloned().unwrap_or(Value::Null))
-                .collect(),
-        ),
-        Value::Array(items) => Value::Array(items.clone()),
-        _ => Value::Array(Vec::new()),
-    }
+    Value::Array(iter_payloads(collection).into_iter().cloned().collect())
 }
 
 /// Dotted lookup; `Null` on any miss.
@@ -227,4 +220,143 @@ pub fn get_field(value: &Value, path: &str) -> Value {
     json_util::get_path(value, path)
         .cloned()
         .unwrap_or(Value::Null)
+}
+
+// ---------------------------------------------------------------------------
+// new builtins: parse_json, count, filter, sum, min, max
+// ---------------------------------------------------------------------------
+
+/// Yields each item: object ⇒ entry values (falling back to the entry itself when no `"payload"`
+/// key is present), array ⇒ items, else empty.
+fn iter_payloads(coll: &Value) -> Vec<&Value> {
+    match coll {
+        Value::Object(entries) => entries
+            .values()
+            .map(|entry| entry.get("payload").unwrap_or(entry))
+            .collect(),
+        Value::Array(items) => items.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `parse_json(x)`: parse a JSON string; non-string or parse failure ⇒ `Null`.
+#[must_use]
+pub fn parse_json(v: &Value) -> Value {
+    v.as_str()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// `count(coll)`: object key count or array length as `i64`; non-collection ⇒ `Null`.
+#[must_use]
+pub fn count_collection(coll: &Value) -> Value {
+    match coll {
+        Value::Object(m) => Value::from(i64::try_from(m.len()).unwrap_or(i64::MAX)),
+        Value::Array(a) => Value::from(i64::try_from(a.len()).unwrap_or(i64::MAX)),
+        _ => Value::Null,
+    }
+}
+
+/// `filter(coll, field, want)`: array of payloads where `get_field(payload, field)` equals `want`.
+#[must_use]
+pub fn filter_collection(coll: &Value, field: &str, want: &Value) -> Value {
+    Value::Array(
+        iter_payloads(coll)
+            .into_iter()
+            .filter(|item| json_eq(&get_field(item, field), want))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Non-truncating integer extraction: `Number` only if serde reports it as exact i64;
+/// `String` only if it trims to a valid i64 literal.
+fn exact_int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// `sum(coll, field)`: exact-integer accumulation in i128, falling to f64 on any fractional value.
+/// Non-numeric field values are skipped. Emits i64 when all inputs are integer-typed, f64 if any input is float-typed.
+#[must_use]
+pub fn sum_field(coll: &Value, field: &str) -> Value {
+    let mut int_acc: i128 = 0;
+    let mut float_acc = 0.0_f64;
+    let mut any_float = false;
+    for item in iter_payloads(coll) {
+        let field_value = get_field(item, field);
+        match exact_int(&field_value) {
+            Some(i) => int_acc = int_acc.saturating_add(i128::from(i)),
+            None => {
+                if let Some(f) = value_as_f64(&field_value) {
+                    float_acc += f;
+                    any_float = true;
+                }
+            }
+        }
+    }
+    if any_float {
+        #[allow(clippy::as_conversions)] // i128→f64 for a mixed-type sum; precision is best-effort
+        Value::from(float_acc + int_acc as f64)
+    } else {
+        i64::try_from(int_acc).map_or_else(
+            |_| {
+                #[allow(clippy::as_conversions)] // overflow fallback only
+                Value::from(int_acc as f64)
+            },
+            Value::from,
+        )
+    }
+}
+
+/// Exact integer comparison, falling back to `f64::total_cmp` for fractional values.
+/// Mirrors `num_eq`'s strategy: avoids the 53-bit mantissa collapse for large integers
+/// (e.g. epoch nanos ~1.7e18 > 2^53).
+fn cmp_num(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match (exact_int(a), exact_int(b)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        _ => value_as_f64(a)
+            .zip(value_as_f64(b))
+            .map(|(x, y)| x.total_cmp(&y)),
+    }
+}
+
+/// Pick best entry by exact numeric ordering; return the original value (exact type/precision).
+fn reduce_field(coll: &Value, field: &str, want_max: bool) -> Value {
+    let mut best: Option<Value> = None;
+    for item in iter_payloads(coll) {
+        let field_value = get_field(item, field);
+        if value_as_f64(&field_value).is_none() {
+            continue;
+        }
+        let take = match &best {
+            None => true,
+            Some(incumbent) => match cmp_num(&field_value, incumbent) {
+                Some(std::cmp::Ordering::Greater) => want_max,
+                Some(std::cmp::Ordering::Less) => !want_max,
+                _ => false,
+            },
+        };
+        if take {
+            best = Some(field_value);
+        }
+    }
+    best.unwrap_or(Value::Null)
+}
+
+/// `min(coll, field)`: item with the least numeric field; empty or no numeric field ⇒ `Null`.
+/// Returns the original value at exact type/precision.
+#[must_use]
+pub fn min_field(coll: &Value, field: &str) -> Value {
+    reduce_field(coll, field, false)
+}
+
+/// `max(coll, field)`: item with the greatest numeric field; empty or no numeric field ⇒ `Null`.
+/// Returns the original value at exact type/precision.
+#[must_use]
+pub fn max_field(coll: &Value, field: &str) -> Value {
+    reduce_field(coll, field, true)
 }

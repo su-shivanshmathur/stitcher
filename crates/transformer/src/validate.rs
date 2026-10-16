@@ -35,6 +35,7 @@ enum ContradictReason {
     UnrootedPath,
     RootInTransform,
     ReduceNotMap,
+    NotCollection,
     DynamicBuiltinArg,
     UnknownEnrichmentTable,
     GetOnList,
@@ -59,6 +60,9 @@ impl ContradictReason {
             }
             Self::ReduceNotMap => {
                 "latest()/first()/list() require a `state.<keyed_map>` path argument"
+            }
+            Self::NotCollection => {
+                "requires a `state.<keyed_map>` path or a collection-producing call (list/filter/parse_json/get/coalesce/if)"
             }
             Self::DynamicBuiltinArg => {
                 "must be a string literal (a dynamic value can't be validated at boot)"
@@ -142,7 +146,9 @@ enum FindingContext {
     Path(String),
     Table(String),
     ReduceArgument,
+    CollectionArgument,
     GetKey,
+    FieldArg,
     LookupTableArg,
     Gate,
 }
@@ -153,7 +159,9 @@ impl FindingContext {
             Self::Root => "`$`".to_string(),
             Self::Path(name) | Self::Table(name) => format!("`{name}`"),
             Self::ReduceArgument => "`latest/first/list`".to_string(),
+            Self::CollectionArgument => "`collection argument`".to_string(),
             Self::GetKey => "`get` key".to_string(),
+            Self::FieldArg => "`field` argument".to_string(),
             Self::LookupTableArg => "`lookup` table".to_string(),
             Self::Gate => "`gate`".to_string(),
         }
@@ -275,10 +283,85 @@ fn call_findings(
         }
         Builtin::Get => get_findings(args, exploding, program, tables),
         Builtin::Lookup => lookup_findings(args, exploding, program, tables),
+        Builtin::Count => match args {
+            [coll] => collection_arg_findings(coll, exploding, program, tables),
+            _ => Vec::new(),
+        },
+        Builtin::Sum | Builtin::Min | Builtin::Max => match args {
+            [coll, field] => {
+                let field_error = (!matches!(field, Expr::Str(_))).then(|| {
+                    Finding::new(
+                        FindingContext::FieldArg,
+                        Verdict::Contradicted(ContradictReason::DynamicBuiltinArg),
+                    )
+                });
+                collection_arg_findings(coll, exploding, program, tables)
+                    .into_iter()
+                    .chain(field_error)
+                    .collect()
+            }
+            _ => Vec::new(),
+        },
+        Builtin::Filter => match args {
+            [coll, field, want] => {
+                let field_error = (!matches!(field, Expr::Str(_))).then(|| {
+                    Finding::new(
+                        FindingContext::FieldArg,
+                        Verdict::Contradicted(ContradictReason::DynamicBuiltinArg),
+                    )
+                });
+                collection_arg_findings(coll, exploding, program, tables)
+                    .into_iter()
+                    .chain(field_error)
+                    .chain(findings(want, exploding, program, tables))
+                    .collect()
+            }
+            _ => Vec::new(),
+        },
         _ => args
             .iter()
             .flat_map(|arg| findings(arg, exploding, program, tables))
             .collect(),
+    }
+}
+
+/// Validates a collection argument for `count`/`sum`/`filter`/`min`/`max`:
+/// a keyed_map path is fine; `filter`/`list`/`parse_json`/`get`/`coalesce`/`if` call results are
+/// treated as opaque collections (their args are recursed); everything else is a shape error.
+fn collection_arg_findings(
+    coll: &Expr,
+    exploding: bool,
+    program: &Program,
+    tables: Option<&[String]>,
+) -> Vec<Finding> {
+    match coll {
+        Expr::Path(path) => {
+            let path_verdict = classify_path(path, exploding, program)
+                .map(|verdict| Finding::new(FindingContext::Path(path.clone()), verdict));
+            let hard_error = path_verdict
+                .as_ref()
+                .is_some_and(|finding| finding.verdict.is_error());
+            let shape_error = (!hard_error && !is_keyed_map_path(path, program)).then(|| {
+                Finding::new(
+                    FindingContext::Path(path.clone()),
+                    Verdict::Contradicted(ContradictReason::NotCollection),
+                )
+            });
+            path_verdict.into_iter().chain(shape_error).collect()
+        }
+        Expr::Call(
+            Builtin::Filter
+            | Builtin::List
+            | Builtin::ParseJson
+            | Builtin::Get
+            | Builtin::Coalesce
+            | Builtin::If,
+            _,
+        ) => findings(coll, exploding, program, tables),
+        _ => vec![Finding::new(
+            FindingContext::CollectionArgument,
+            Verdict::Contradicted(ContradictReason::NotCollection),
+        )],
     }
 }
 
@@ -336,8 +419,8 @@ fn get_findings(
                 .chain(std::iter::once(opaque))
                 .collect()
         }
-        // get() by key on a list() result (an array) always resolves to null — reject it.
-        [value @ Expr::Call(Builtin::List, _), Expr::Str(key)] => {
+        // get() by key on a list()/filter() result (an array) always resolves to null — reject it.
+        [value @ Expr::Call(Builtin::List | Builtin::Filter, _), Expr::Str(key)] => {
             let reject = Finding::new(
                 FindingContext::Path(key.clone()),
                 Verdict::Contradicted(ContradictReason::GetOnList),

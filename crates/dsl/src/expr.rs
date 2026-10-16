@@ -108,11 +108,25 @@ pub enum Builtin {
     Get,
     /// `lookup(table, key)` — enrichment join (only meaningful in transform context).
     Lookup,
+    /// `parse_json(x)` — parse a JSON string into a value (misses ⇒ null).
+    ParseJson,
+    /// `count(coll)` — entry count of a keyed_map or array.
+    Count,
+    /// `if(cond, then, else)` — one branch chosen by truthiness.
+    If,
+    /// `sum(coll, 'field')` — numeric sum of a field over the collection.
+    Sum,
+    /// `filter(coll, 'field', value)` — keep entries whose field equals value.
+    Filter,
+    /// `min(coll, 'field')` — least numeric field over the collection.
+    Min,
+    /// `max(coll, 'field')` — greatest numeric field over the collection.
+    Max,
 }
 
 impl Builtin {
     /// Every builtin — the single source for name/arity lookups and diagnostics.
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 19] = [
         Self::ParseTime,
         Self::Meaningful,
         Self::Bucket,
@@ -125,6 +139,13 @@ impl Builtin {
         Self::List,
         Self::Get,
         Self::Lookup,
+        Self::ParseJson,
+        Self::Count,
+        Self::If,
+        Self::Sum,
+        Self::Filter,
+        Self::Min,
+        Self::Max,
     ];
 
     #[must_use]
@@ -142,6 +163,13 @@ impl Builtin {
             Self::List => "list",
             Self::Get => "get",
             Self::Lookup => "lookup",
+            Self::ParseJson => "parse_json",
+            Self::Count => "count",
+            Self::If => "if",
+            Self::Sum => "sum",
+            Self::Filter => "filter",
+            Self::Min => "min",
+            Self::Max => "max",
         }
     }
 
@@ -155,8 +183,17 @@ impl Builtin {
             | Self::Lower
             | Self::Latest
             | Self::First
-            | Self::List => Arity::Exact(1),
-            Self::Bucket | Self::Coalesce | Self::Get | Self::Lookup => Arity::Exact(2),
+            | Self::List
+            | Self::ParseJson
+            | Self::Count => Arity::Exact(1),
+            Self::Bucket
+            | Self::Coalesce
+            | Self::Get
+            | Self::Lookup
+            | Self::Sum
+            | Self::Min
+            | Self::Max => Arity::Exact(2),
+            Self::If | Self::Filter => Arity::Exact(3),
         }
     }
 }

@@ -88,7 +88,7 @@ The `a|b|c` **alternation** is the join mechanism — *"tell it where to find th
 differently-shaped events co-key into the same session.
 
 **Merge nodes:** `latest_by` (greatest comparator) · `keyed_map` (grow-only map of `latest_by`) · `last` · `once` (write-once) · `counter`.
-**DSL** (in `when`/`key`/`comparator`/`payload`): paths + `== != < <= > >= && || !` and builtins `parse_time, meaningful, bucket, round, trim, lower, coalesce, latest, first, list, get, lookup`.
+**DSL** (in `when`/`key`/`comparator`/`payload`): paths + `== != < <= > >= && || !` and builtins `parse_time, meaningful, bucket, round, trim, lower, coalesce, latest, first, list, get, lookup, parse_json, count, if, sum, filter, min, max`.
 
 ## Storage
 
