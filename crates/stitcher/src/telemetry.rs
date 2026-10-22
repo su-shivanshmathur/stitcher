@@ -40,7 +40,7 @@ fn filtering_directive(cfg: &LogCfg, inspect_events: bool) -> String {
         }
     }
     if inspect_events {
-        format!("{},{}=debug", cfg.level, crate::inspect::TARGET)
+        format!("{},{}=debug", cfg.level, crate::constants::INSPECT_TARGET)
     } else {
         cfg.level.clone()
     }

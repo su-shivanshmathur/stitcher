@@ -4,11 +4,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::{DebugCfg, InspectFormat};
+use crate::constants::{HASH_F64_ONE_BITS, HASH_F64_SHIFT, INSPECT_TARGET, REDACTION_MASK};
 use crate::processor::OutMsg;
-
-const MASK: &str = "***";
-
-pub const TARGET: &str = "stitcher::inspect";
 
 #[derive(Debug, Clone)]
 pub struct Inspect {
@@ -81,7 +78,7 @@ impl Inspect {
             return;
         }
         tracing::debug!(
-            target: TARGET,
+            target: INSPECT_TARGET,
             topic,
             partition,
             offset,
@@ -102,7 +99,7 @@ impl Inspect {
 
     pub fn emit_state(&self, key: &str, version: i64, old: &str, merged: &str) {
         tracing::debug!(
-            target: TARGET,
+            target: INSPECT_TARGET,
             key,
             version,
             old = %old,
@@ -121,7 +118,7 @@ impl Inspect {
                 continue;
             }
             tracing::debug!(
-                target: TARGET,
+                target: INSPECT_TARGET,
                 topic = %m.topic,
                 key = %m.key,
                 payload = %self.render_bytes(&m.payload),
@@ -156,7 +153,7 @@ fn redact_value(value: &mut Value, fields: &[String]) {
         Value::Object(map) => {
             for (field_name, field_value) in map.iter_mut() {
                 if fields.iter().any(|redacted| redacted == field_name) {
-                    *field_value = Value::String(MASK.to_string());
+                    *field_value = Value::String(REDACTION_MASK.to_string());
                 } else {
                     redact_value(field_value, fields);
                 }
@@ -177,10 +174,7 @@ fn rand_unit() -> f64 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
 
-    const SHIFT: u32 = u64::BITS - f64::MANTISSA_DIGITS; // keep the top 52 hash bits
-    const F64_ONE: u64 = f64::to_bits(1.0); // exponent field for floats in [1, 2)
-
     let mut hasher = RandomState::new().build_hasher();
     hasher.write_u64(0); // mix the per-call random seed into the final value
-    f64::from_bits(F64_ONE | (hasher.finish() >> SHIFT)) - 1.0
+    f64::from_bits(HASH_F64_ONE_BITS | (hasher.finish() >> HASH_F64_SHIFT)) - 1.0
 }

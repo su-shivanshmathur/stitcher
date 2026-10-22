@@ -86,6 +86,21 @@ counter_vec!(
 );
 counter_vec!(ERRORS_TOTAL, "Pipeline errors by stage", &["stage"]);
 counter_vec!(BATCHES_TOTAL, "Batches processed", &[]);
+counter_vec!(
+    CROSS_WRITER_CONFLICT_TOTAL,
+    "Keys read back carrying another instance's write-token (cross-writer / co-partitioning violation)",
+    &[]
+);
+counter_vec!(
+    CROSS_PARTITION_KEY_TOTAL,
+    "Same session key folded from more than one source partition within a batch",
+    &[]
+);
+counter_vec!(
+    PARTITION_KEY_MISMATCH_TOTAL,
+    "Records whose Kafka key differs from the computed session key (producer not co-partitioning by session key)",
+    &[]
+);
 histogram_vec!(BATCH_SIZE, "Records per batch", &[]);
 histogram_vec!(STORE_GET_SECONDS, "Store read latency", &["backend"]);
 histogram_vec!(STORE_PUT_SECONDS, "Store write latency", &["backend"]);
@@ -182,6 +197,24 @@ pub fn errors_total(stage: &'static str) {
 
 pub fn batches() {
     if let Some(counter) = &*BATCHES_TOTAL {
+        counter.with_label_values(&[]).inc();
+    }
+}
+
+pub fn cross_writer_conflict() {
+    if let Some(counter) = &*CROSS_WRITER_CONFLICT_TOTAL {
+        counter.with_label_values(&[]).inc();
+    }
+}
+
+pub fn cross_partition_key() {
+    if let Some(counter) = &*CROSS_PARTITION_KEY_TOTAL {
+        counter.with_label_values(&[]).inc();
+    }
+}
+
+pub fn partition_key_mismatch() {
+    if let Some(counter) = &*PARTITION_KEY_MISMATCH_TOTAL {
         counter.with_label_values(&[]).inc();
     }
 }

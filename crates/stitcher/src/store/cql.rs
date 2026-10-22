@@ -1,6 +1,12 @@
 //! CQL backend (ScyllaDB / Cassandra): Quorum consistency over `id, id_type, version, state`.
+//! An optional `write_token bigint` column enables observe-only cross-writer detection: a key
+//! read back carrying a token this pod did not write means another instance wrote it.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use error_stack::ResultExt;
 use futures::{StreamExt, TryStreamExt};
@@ -14,6 +20,7 @@ use scylla::{
 use super::{RebalanceEvent, Store};
 use crate::{
     config,
+    constants::WRITE_TOKEN_MAP_CAP,
     errors::{StitcherError, StitcherResult},
     metrics,
     processor::Key,
@@ -47,11 +54,73 @@ impl AddressTranslator for PeerAddressMap {
     }
 }
 
+/// Per-pod last write-token per key. A key read back with a token this pod did not write means
+/// another instance wrote it — a cross-writer (co-partitioning) violation. Observe-only; the map
+/// is capped (cleared wholesale past the cap) so it never grows unbounded.
+#[derive(Default)]
+struct WriteTracker {
+    seen: Mutex<HashMap<Key, i64>>,
+}
+
+impl WriteTracker {
+    // Recover the guard on poison — a best-effort observability map, never worth a panic.
+    fn seen_map(&self) -> std::sync::MutexGuard<'_, HashMap<Key, i64>> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn note_write(&self, key: &Key, token: i64) {
+        let mut seen = self.seen_map();
+        if seen.len() >= WRITE_TOKEN_MAP_CAP {
+            seen.clear();
+        }
+        seen.insert(key.clone(), token);
+    }
+
+    fn observe_read(&self, key: &Key, token: Option<i64>) {
+        if let Some(token) = token {
+            let mut seen = self.seen_map();
+            if seen.get(key).is_some_and(|&mine| mine != token) {
+                metrics::cross_writer_conflict();
+                tracing::warn!(
+                    key = %key.as_str(),
+                    "cql: cross-writer conflict — key last written by another instance"
+                );
+            }
+            if seen.len() >= WRITE_TOKEN_MAP_CAP {
+                seen.clear();
+            }
+            seen.insert(key.clone(), token);
+        }
+    }
+}
+
+// Per-call random-ish write token (same zero-dep entropy source as inspect sampling).
+fn new_write_token() -> i64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(0);
+    i64::from_ne_bytes(hasher.finish().to_ne_bytes())
+}
+
+async fn prepare_quorum(session: &Session, cql: String) -> StitcherResult<PreparedStatement> {
+    let mut stmt = session
+        .prepare(cql.clone())
+        .await
+        .map_err(|e| error_stack::report!(StitcherError::Cql(format!("prepare {cql}: {e}"))))?;
+    stmt.set_consistency(Consistency::Quorum);
+    Ok(stmt)
+}
+
 pub struct CqlStore {
     session: Arc<Session>,
     select: PreparedStatement,
     insert: PreparedStatement,
     read_concurrency: usize,
+    // `None` when the `write_token` column is absent — cross-writer detection is then off.
+    write_tracker: Option<WriteTracker>,
 }
 
 impl std::fmt::Debug for CqlStore {
@@ -104,41 +173,57 @@ impl CqlStore {
             .map_err(|e| error_stack::report!(StitcherError::Cql(format!("health check: {e}"))))?;
 
         let table = format!("{}.{}", cfg.keyspace, cfg.table);
-        let mut select = session
-            .prepare(format!(
-                "SELECT version, state FROM {table} WHERE id_type = ? AND id = ?"
-            ))
-            .await
-            .map_err(|e| {
-                error_stack::report!(StitcherError::Cql(format!("prepare select: {e}")))
-            })?;
-        select.set_consistency(Consistency::Quorum);
-        tracing::debug!(
-            statement = %format!("SELECT version, state FROM {table} WHERE id_type = ? AND id = ?"),
-            consistency = "Quorum",
-            "cql statement prepared"
-        );
-
-        let mut insert = session
-            .prepare(format!(
-                "INSERT INTO {table} (id, id_type, version, state) VALUES (?, ?, ?, ?)"
-            ))
-            .await
-            .map_err(|e| {
-                error_stack::report!(StitcherError::Cql(format!("prepare insert: {e}")))
-            })?;
-        insert.set_consistency(Consistency::Quorum);
-        tracing::debug!(
-            statement = %format!("INSERT INTO {table} (id, id_type, version, state) VALUES (?, ?, ?, ?)"),
-            consistency = "Quorum",
-            "cql statement prepared"
-        );
+        // Prefer the write-token statements (cross-writer detection); fall back to the plain
+        // schema when the column is absent, so detection is opt-in via a single ALTER TABLE
+        // rather than a hard startup dependency.
+        let token_select = prepare_quorum(
+            &session,
+            format!("SELECT version, state, write_token FROM {table} WHERE id_type = ? AND id = ?"),
+        )
+        .await;
+        let token_insert = prepare_quorum(
+            &session,
+            format!(
+                "INSERT INTO {table} (id, id_type, version, state, write_token) \
+                 VALUES (?, ?, ?, ?, ?)"
+            ),
+        )
+        .await;
+        let (select, insert, write_tracker) = match (token_select, token_insert) {
+            (Ok(select), Ok(insert)) => {
+                tracing::info!("cql: write_token column present — cross-writer detection enabled");
+                (select, insert, Some(WriteTracker::default()))
+            }
+            (select_result, insert_result) => {
+                let reason = select_result
+                    .err()
+                    .or_else(|| insert_result.err())
+                    .map_or_else(|| "unknown".to_string(), |e| e.to_string());
+                tracing::warn!(
+                    error = %reason,
+                    "cql: write_token statements unavailable (column absent or prepare failed) — \
+                     cross-writer detection disabled (ALTER TABLE {table} ADD write_token bigint)"
+                );
+                let select = prepare_quorum(
+                    &session,
+                    format!("SELECT version, state FROM {table} WHERE id_type = ? AND id = ?"),
+                )
+                .await?;
+                let insert = prepare_quorum(
+                    &session,
+                    format!("INSERT INTO {table} (id, id_type, version, state) VALUES (?, ?, ?, ?)"),
+                )
+                .await?;
+                (select, insert, None)
+            }
+        };
 
         Ok(Self {
             session,
             select,
             insert,
             read_concurrency,
+            write_tracker,
         })
     }
 
@@ -169,16 +254,34 @@ impl CqlStore {
                 let rows = result
                     .into_rows_result()
                     .change_context(StitcherError::Cql("rows result".to_string()))?;
-                let mut typed = rows.rows::<(i64, Vec<u8>)>().map_err(|e| {
-                    error_stack::report!(StitcherError::Cql(format!("typed rows: {e}")))
-                })?;
-                typed
-                    .next()
-                    .transpose()
-                    .map_err(|e| {
-                        error_stack::report!(StitcherError::Cql(format!("decode row: {e}")))
-                    })
-                    .map(|row| row.map(|(version, state)| (key, (version, state))))
+                let found = match &self.write_tracker {
+                    Some(tracker) => rows
+                        .rows::<(i64, Vec<u8>, Option<i64>)>()
+                        .map_err(|e| {
+                            error_stack::report!(StitcherError::Cql(format!("typed rows: {e}")))
+                        })?
+                        .next()
+                        .transpose()
+                        .map_err(|e| {
+                            error_stack::report!(StitcherError::Cql(format!("decode row: {e}")))
+                        })?
+                        .map(|(version, state, token)| {
+                            tracker.observe_read(&key, token);
+                            (key, (version, state))
+                        }),
+                    None => rows
+                        .rows::<(i64, Vec<u8>)>()
+                        .map_err(|e| {
+                            error_stack::report!(StitcherError::Cql(format!("typed rows: {e}")))
+                        })?
+                        .next()
+                        .transpose()
+                        .map_err(|e| {
+                            error_stack::report!(StitcherError::Cql(format!("decode row: {e}")))
+                        })?
+                        .map(|(version, state)| (key, (version, state))),
+                };
+                Ok(found)
             },
         )
         .await
@@ -218,17 +321,37 @@ impl Store for CqlStore {
                 );
             },
             async {
-                self.session
-                    .execute_unpaged(&self.insert, (key.as_str(), id_type, version, blob))
-                    .await
-                    .change_context(StitcherError::Cql("execute insert".to_string()))?;
+                match &self.write_tracker {
+                    Some(tracker) => {
+                        let token = new_write_token();
+                        self.session
+                            .execute_unpaged(
+                                &self.insert,
+                                (key.as_str(), id_type, version, blob, token),
+                            )
+                            .await
+                            .change_context(StitcherError::Cql("execute insert".to_string()))?;
+                        tracker.note_write(key, token);
+                    }
+                    None => {
+                        self.session
+                            .execute_unpaged(&self.insert, (key.as_str(), id_type, version, blob))
+                            .await
+                            .change_context(StitcherError::Cql("execute insert".to_string()))?;
+                    }
+                }
                 Ok(())
             },
         )
         .await
     }
 
-    async fn on_rebalance(&self, _ev: &RebalanceEvent) -> StitcherResult<()> {
+    async fn on_rebalance(&self, ev: &RebalanceEvent) -> StitcherResult<()> {
+        // Mirror RocksDB's revoke wipe: drop stale write-tokens so a cleanly handed-off key is not
+        // misread as a cross-writer conflict when it is later re-assigned back to this pod.
+        if let (RebalanceEvent::Revoke(_), Some(tracker)) = (ev, &self.write_tracker) {
+            tracker.seen_map().clear();
+        }
         Ok(())
     }
 

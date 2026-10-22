@@ -79,11 +79,14 @@ pub async fn run<P: Processor>(
     while let Some(batch) = StreamExt::next(&mut batches).await {
         // `_batch` decrements `in_flight` on drop — every exit path releases the rebalance drain.
         let Some(_batch) = guard.begin_batch() else {
-            // revoke mid-batch: stop — the unprocessed range replays from the committed watermark
+            // revoke in progress: drop this uncommitted batch (it replays from the committed
+            // watermark), wait for the reassign to settle, then keep consuming — exiting here
+            // would let every rebalance kill the worker and block a stable multi-pod group.
             tracing::warn!(
-                "rebalance drain active; dropping uncommitted batch and stopping (replay-safe)"
+                "rebalance in progress; dropping uncommitted batch (replay-safe), awaiting reassign"
             );
-            break;
+            guard.wait_for_resume().await;
+            continue;
         };
         let started = Instant::now();
         // capture the commit watermark before the batch is moved into the work
@@ -186,13 +189,12 @@ fn oldest_lag_secs(records: &[OwnedRecord]) -> Option<f64> {
 
 /// Exponential backoff on transport errors (reset on a clean batch); `false` = stop.
 async fn on_transport_error(err: Option<String>, failures: &mut u32) -> bool {
-    const MAX_TRANSPORT_FAILURES: u32 = 6;
     let Some(err) = err else {
         *failures = 0;
         return true;
     };
     *failures = failures.saturating_add(1);
-    if *failures > MAX_TRANSPORT_FAILURES {
+    if *failures > crate::constants::MAX_TRANSPORT_FAILURES {
         tracing::error!(
             error = %err,
             failures = *failures,
@@ -321,6 +323,17 @@ async fn process_batch<P: Processor>(
         match decoded {
             Some((key, state)) => {
                 metrics::messages_decoded();
+                // Gate-A contract: the producer keys the source topic by the session key, so every
+                // session co-partitions onto one partition (one writer). A record whose Kafka key
+                // differs is a co-partitioning violation (cross-writer risk).
+                if rec.key.as_deref() != Some(key.as_bytes()) {
+                    metrics::partition_key_mismatch();
+                    tracing::debug!(
+                        session_key = %key.as_str(),
+                        kafka_key_present = rec.key.is_some(),
+                        "Kafka record key != session key — producer not co-partitioning by session key (cross-writer risk)"
+                    );
+                }
                 tracing::debug!(
                     key = %key.as_str(),
                     topic = %rec.topic,
@@ -335,6 +348,15 @@ async fn process_batch<P: Processor>(
                 };
                 match states.remove(&key) {
                     Some((old, won)) => {
+                        if won.partition != cause.partition {
+                            metrics::cross_partition_key();
+                            tracing::warn!(
+                                key = %key.as_str(),
+                                partition_a = won.partition,
+                                partition_b = cause.partition,
+                                "key folded from >1 source partition — co-partitioning violated (cross-writer risk)"
+                            );
+                        }
                         states.insert(key, (old.merge(state), won.max(cause)));
                     }
                     None => {
