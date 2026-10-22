@@ -11,12 +11,11 @@ use tokio::task::spawn_blocking;
 use super::{RebalanceEvent, Store};
 use crate::{
     codec, config,
+    constants::{ROCKS_WRITE_CHUNK_SIZE, STATE_COLUMN_FAMILY_PREFIX},
     errors::{StitcherError, StitcherResult},
     metrics,
     processor::Key,
 };
-
-const STATE_COLUMN_FAMILY_PREFIX: &str = "state.";
 
 pub struct RocksStore {
     db: Arc<DB>,
@@ -133,7 +132,6 @@ impl RocksStore {
     }
 
     async fn put_many_inner(&self, entries: &[(Key, Vec<u8>)], version: i64) -> StitcherResult<()> {
-        const CHUNK_SIZE: usize = 1024;
         let n_entries = entries.len();
         // pre-encode before entering spawn_blocking
         let encoded: Vec<(Vec<u8>, Vec<u8>)> = entries
@@ -161,7 +159,7 @@ impl RocksStore {
                     })?;
                     let mut wopts = rocksdb::WriteOptions::default();
                     wopts.disable_wal(true);
-                    for chunk in encoded.chunks(CHUNK_SIZE) {
+                    for chunk in encoded.chunks(ROCKS_WRITE_CHUNK_SIZE) {
                         let mut batch = rocksdb::WriteBatch::default();
                         for (key_bytes, value) in chunk {
                             batch.put_cf(&column_family, key_bytes, value);

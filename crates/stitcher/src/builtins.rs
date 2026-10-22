@@ -3,6 +3,7 @@
 use serde_json::Value;
 use stitcher_dsl::TimeFormat;
 
+use crate::constants::NANOS_PER_SEC;
 use crate::json_util;
 
 /// `fmt` declares the input unit; absent ⇒ number as-is, string numeric or RFC3339.
@@ -24,12 +25,11 @@ pub fn parse_time(v: &Value, fmt: Option<TimeFormat>) -> Option<i64> {
 
 /// RFC3339 / ISO-8601 → epoch nanos (accepts offsets; missing offset assumed UTC).
 fn parse_rfc3339_nanos(s: &str) -> Option<i64> {
-    const SEC: i64 = 1_000_000_000;
     // Full RFC3339 with offset, e.g. "2024-05-05T12:34:56.789Z" / "...+05:30".
     if let Ok(ts) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339) {
         return Some(
             ts.unix_timestamp()
-                .saturating_mul(SEC)
+                .saturating_mul(NANOS_PER_SEC)
                 .saturating_add(i64::from(ts.nanosecond())),
         );
     }
@@ -37,7 +37,7 @@ fn parse_rfc3339_nanos(s: &str) -> Option<i64> {
     let fmt = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
     time::PrimitiveDateTime::parse(s, &fmt)
         .ok()
-        .map(|p| p.assume_utc().unix_timestamp().saturating_mul(SEC))
+        .map(|p| p.assume_utc().unix_timestamp().saturating_mul(NANOS_PER_SEC))
 }
 
 /// `meaningful`: drop `null`, `"null"`, `"UNKNOWN"`, `"unknown"`, `""`.

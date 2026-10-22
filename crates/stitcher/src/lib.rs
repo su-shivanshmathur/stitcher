@@ -3,6 +3,7 @@
 pub mod builtins;
 pub mod codec;
 pub mod config;
+pub mod constants;
 pub mod enrichment;
 pub mod errors;
 pub mod eval;

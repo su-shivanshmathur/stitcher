@@ -18,6 +18,7 @@ use rdkafka::{
 
 use crate::{
     config,
+    constants::{COMMIT_RETRIES, RESUME_POLL_INTERVAL},
     errors::{StitcherError, StitcherResult},
     metrics,
     store::{PartitionRef, RebalanceEvent, Store},
@@ -49,6 +50,15 @@ impl RebalanceGuard {
     #[must_use]
     pub fn is_draining(&self) -> bool {
         self.drained_flag.load(Ordering::SeqCst)
+    }
+
+    /// Park until a revoke's drain + reassign settles (`post_rebalance` clears the flag) so the
+    /// pipeline can resume instead of exiting. Cold path (rebalances are rare), so a coarse poll
+    /// beats entangling a `watch` with the `in_flight` SeqCst drain handshake.
+    pub async fn wait_for_resume(&self) {
+        while self.drained_flag.load(Ordering::SeqCst) {
+            tokio::time::sleep(RESUME_POLL_INTERVAL).await;
+        }
     }
 }
 
@@ -191,9 +201,8 @@ impl KafkaConsumer {
                 .add_partition_offset(topic, *partition, Offset::from_raw(*next_offset))
                 .change_context(StitcherError::Kafka("build commit watermark".to_string()))?;
         }
-        const RETRIES: usize = 3;
         let mut last_err: Option<String> = None;
-        for attempt in 1..=RETRIES {
+        for attempt in 1..=COMMIT_RETRIES {
             match self
                 .consumer
                 .commit(&offsets_to_commit, rdkafka::consumer::CommitMode::Async)
@@ -210,7 +219,7 @@ impl KafkaConsumer {
             }
         }
         Err(error_stack::report!(StitcherError::Kafka(format!(
-            "offset commit failed after {RETRIES} attempts: {}",
+            "offset commit failed after {COMMIT_RETRIES} attempts: {}",
             last_err.unwrap_or_default()
         ))))
     }
@@ -297,6 +306,7 @@ pub struct OwnedRecord {
     pub partition: i32,
     pub offset: i64,
     pub timestamp_ms: Option<i64>,
+    pub key: Option<Vec<u8>>,
     pub payload: Vec<u8>,
 }
 
@@ -309,6 +319,7 @@ impl OwnedRecord {
             partition: msg.partition(),
             offset: msg.offset(),
             timestamp_ms: msg.timestamp().to_millis(),
+            key: msg.key().map(<[u8]>::to_vec),
             payload: msg.payload().map_or_else(Vec::new, <[u8]>::to_vec),
         }
     }
