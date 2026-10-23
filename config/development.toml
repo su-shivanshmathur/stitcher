@@ -26,6 +26,8 @@ extra = { "queued.max.messages.kbytes" = "16384", "partition.assignment.strategy
 brokers = ["localhost:9092"]
 dlq_topic = "stitcher-dlq"
 extra = { }
+# dlq_brokers = ["dlq-host:9092"]        # omit ⇒ reuse sink brokers
+# dlq_extra   = { "security.protocol" = "SASL_SSL" }
 
 [batch]
 count = 100000

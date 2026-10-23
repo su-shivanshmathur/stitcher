@@ -18,6 +18,7 @@ use crate::{
 
 pub struct KafkaProducer {
     producer: FutureProducer,
+    dlq_producer: Option<FutureProducer>, // None ⇒ reuse `producer` (shared sink cluster)
     dlq_topic: String,
     delivery_timeout: Duration,
 }
@@ -120,7 +121,8 @@ impl KafkaProducer {
             .key(&dlq_key)
             .payload(raw)
             .headers(headers);
-        let delivery = self.producer.send_result(record).map_err(|(e, _)| {
+        let dlq = self.dlq_producer.as_ref().unwrap_or(&self.producer);
+        let delivery = dlq.send_result(record).map_err(|(e, _)| {
             error_stack::report!(StitcherError::Kafka(format!("dlq enqueue: {e}")))
         })?;
         delivery
@@ -144,24 +146,38 @@ impl KafkaProducer {
         self.producer
             .flush(timeout)
             .change_context(StitcherError::Kafka("flush".to_string()))?;
+        if let Some(dlq) = &self.dlq_producer {
+            dlq.flush(timeout)
+                .change_context(StitcherError::Kafka("dlq flush".to_string()))?;
+        }
         Ok(())
     }
 }
 
-pub fn build(cfg: &config::Settings) -> StitcherResult<KafkaProducer> {
+fn build_producer(brokers: &[String], extra: &config::KafkaExtra) -> StitcherResult<FutureProducer> {
     let mut conf = ClientConfig::new();
-    conf.set("bootstrap.servers", cfg.sink_kafka.brokers.join(","))
+    conf.set("bootstrap.servers", brokers.join(","))
         .set("enable.idempotence", "true")
         .set("acks", "all");
-    for (k, v) in cfg.sink_kafka.extra.iter() {
+    for (k, v) in extra.iter() {
         conf.set(k, v);
     }
-    let producer: FutureProducer = conf
-        .create()
-        .change_context(StitcherError::Kafka("create producer".to_string()))?;
+    conf.create()
+        .change_context(StitcherError::Kafka("create producer".to_string()))
+}
+
+pub fn build(cfg: &config::Settings) -> StitcherResult<KafkaProducer> {
+    let sink = &cfg.sink_kafka;
+    let producer = build_producer(&sink.brokers, &sink.extra)?;
+    let dlq_producer = if sink.dlq_brokers.is_empty() {
+        None
+    } else {
+        Some(build_producer(&sink.dlq_brokers, &sink.dlq_extra)?)
+    };
     Ok(KafkaProducer {
         producer,
-        dlq_topic: cfg.sink_kafka.dlq_topic.clone(),
-        delivery_timeout: Duration::from_secs(cfg.sink_kafka.delivery_timeout_secs),
+        dlq_producer,
+        dlq_topic: sink.dlq_topic.clone(),
+        delivery_timeout: Duration::from_secs(sink.delivery_timeout_secs),
     })
 }
