@@ -12,7 +12,7 @@ COPY crates ./crates
 COPY config ./config
 
 # --locked: the git revs + serde pin live in Cargo.lock
-RUN cargo build --locked --release -p stitcher --bin stitcher
+RUN cargo build --locked --release -p stitcher-cli
 
 # Stage 1 — runtime
 FROM debian:bookworm-slim

@@ -143,6 +143,10 @@ pub struct SinkKafka {
     pub dlq_topic: String,
     /// Delivery timeout per record, seconds.
     pub delivery_timeout_secs: u64,
+    /// DLQ broker set; empty ⇒ reuse the sink cluster.
+    pub dlq_brokers: Vec<String>,
+    /// Extra librdkafka props for a dedicated DLQ cluster (own SASL/SSL).
+    pub dlq_extra: KafkaExtra,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -329,6 +333,8 @@ impl Default for SinkKafka {
             extra: KafkaExtra::default(),
             dlq_topic: "stitcher-dlq".to_string(),
             delivery_timeout_secs: 30,
+            dlq_brokers: Vec::new(),
+            dlq_extra: KafkaExtra::default(),
         }
     }
 }

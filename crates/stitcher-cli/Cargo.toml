@@ -10,13 +10,16 @@ name = "stitcher"
 path = "src/main.rs"
 
 [features]
-default = ["transform"]
-# `transform` links the transformer crate; without it the binary is pure state
-# management (the state logger).
+# NOTE: dropping a backend (e.g. --no-default-features --features transform,cql) does
+# NOT compile yet — build_store is only defined for cfg(all(rocks, cql)) and pipeline
+# calls it unconditionally. These passthroughs are forward plumbing; default stays all-on.
+default   = ["transform", "cql", "rocks"]
 transform = ["dep:transformer"]
+cql       = ["stitcher/cql"]
+rocks     = ["stitcher/rocks"]
 
 [dependencies]
-stitcher = { path = "../stitcher" }
+stitcher = { path = "../stitcher", default-features = false }
 transformer = { path = "../transformer", optional = true }
 
 tokio.workspace = true
