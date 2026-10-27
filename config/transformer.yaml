@@ -1,0 +1,41 @@
+# Output transformer for the `device` state (config/state.yaml) → N Kafka topics.
+# Runtime, versioned, loaded once at boot; a change here is applied on restart
+# (no hot-reload). Wired via `[transform] config_file` in the env config.
+version: 1
+
+# device: one row per device, enriched with the LATEST reading's sensor.
+stream:
+  - name: device
+    topic: stitcher-device-events
+    sign_flag: true
+    gate: "state.device_profile.payload != null"   # == isStateProper
+    retention:
+      days: 182
+      key: registered_at                            # top-level ⇒ fires
+    key: "state.device_profile.payload.device_id"
+    fields:
+      device_id: "meaningful(state.device_profile.payload.device_id)"
+      site_id: "meaningful(state.device_profile.payload.site_id)"
+      firmware: "state.device_profile.payload.firmware_version"
+      registered_at: "state.device_profile.payload.registered_at"
+      event_count: "state.event_count"
+      last_sensor: "get(latest(state.reading_object), 'sensor')"   # cross-entity reduce
+      readings: "list(state.reading_object)"
+
+  # reading: one row per reading (explode the map) + device-level common fields.
+  - name: reading
+    topic: stitcher-reading-events
+    sign_flag: true
+    retention:
+      days: 182
+      key: recorded_at
+    explode: "state.reading_object"
+    key: "each.payload.reading_id"
+    common:
+      device_id: "state.device_profile.payload.device_id"
+      site_id: "state.device_profile.payload.site_id"
+    element:
+      reading_id: "meaningful(each.payload.reading_id)"
+      sensor: "meaningful(each.payload.sensor)"
+      value: "round(each.payload.value)"
+      recorded_at: "each.payload.recorded_at"

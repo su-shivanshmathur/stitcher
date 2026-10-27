@@ -1,4 +1,4 @@
-//! `transformer.toml` model + ahead-of-time compilation: DSL strings parsed once at boot,
+//! `transformer.yaml` model + ahead-of-time compilation: DSL strings parsed once at boot,
 //! fail fast. Versioned.
 
 use std::{collections::BTreeMap, path::Path};

@@ -28,7 +28,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Validate a `transformer.toml` against a `state.yaml` and exit (CI-runnable).
+    /// Validate a transformer config against a `state.yaml` and exit (CI-runnable).
     CheckTransformer {
         #[arg(long = "state", value_name = "FILE")]
         state: PathBuf,
@@ -52,7 +52,7 @@ pub struct Settings {
     pub store: StoreCfg,
     /// State-machine config for the generic binary (`state.yaml`).
     pub state: Option<StateCfg>,
-    /// Output transformer (`transformer.toml`); absent ⇒ passthrough `encode`.
+    /// Output transformer (`transformer.yaml`); absent ⇒ passthrough `encode`.
     pub transform: TransformCfg,
     pub enrichment: Enrichment,
     /// Tenant allow-list.
@@ -205,7 +205,7 @@ pub struct StateCfg {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct TransformCfg {
-    /// Path to `transformer.toml`; absent ⇒ passthrough `encode`.
+    /// Path to `transformer.yaml`; absent ⇒ passthrough `encode`.
     pub config_file: Option<PathBuf>,
 }
 
