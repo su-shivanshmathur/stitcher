@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY config ./config
 
 # --locked: the git revs + serde pin live in Cargo.lock
 RUN cargo build --locked --release -p stitcher-cli
@@ -24,7 +23,6 @@ USER stitcher
 WORKDIR /app
 
 COPY --from=builder /src/target/release/stitcher /app/
-COPY --from=builder /src/config /app/config
 
 # Production config is injected at runtime: STITCHER__* env vars, or a mounted
 # file passed via --config-path. Missing config fails fast at validation.
