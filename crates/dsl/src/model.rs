@@ -58,7 +58,7 @@ pub enum Field {
         key: String,
         value: Box<Self>,
     },
-    /// Last value by arrival order (no comparator; overwrites on every admitted record).
+    /// Keep the last meaningful value by arrival order (no comparator).
     #[serde(rename = "last_seen")]
     Last { when: Option<String>, value: String },
     /// First meaningful value, sticky across restart/replay (write-once).
