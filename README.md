@@ -96,6 +96,7 @@ differently-shaped events co-key into the same session.
 | `last_seen` | keep the last value by arrival order (no comparator) |
 | `write_once` | first meaningful value; sticky across restart/replay |
 | `counter` | sum; contributes +1 per admitted record |
+
 **DSL** (in `when`/`key`/`comparator`/`payload`): paths + `== != < <= > >= && || !` and builtins `parse_time, meaningful, bucket, round, trim, lower, coalesce, latest, first, list, get, lookup, parse_json, count, if, sum, filter, min, max`.
 `latest`/`first` optionally take a second `'field'` (`latest(map, 'created_at')`) to rank by that payload field instead of the stored comparator.
 
