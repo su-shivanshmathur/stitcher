@@ -69,25 +69,34 @@ A YAML schema compiles into a `Program` the interpreter runs. It declares **admi
 
 ```yaml
 primary_key: "{device_id|log.device_id}-{site_id|log.site_id}"
-decode_filter:
-  log_type_path: "log_type|api_flow|flow"   # discriminator: first path present wins
-fields:
-  device_profile:                            # body under `log`
-    node: latest_by
+accept:
+  event_type_path: "log_type|api_flow|flow"   # discriminator: first path present wins
+state:
+  device_profile:                              # body under `log`
+    strategy: latest_by
     when: "log_type == 'device_profile'"
     comparator: "parse_time(log.modified_at)"
     payload: "log"
-  command_event_object:                      # different domain, FLAT — payload defaults to `$`
-    node: keyed_map
+  command_event_object:                        # different domain, FLAT — payload defaults to `$`
+    strategy: grouped_map
     when: "api_flow == 'ProvisionDevice'"
     key: "meaningful(created_at_timestamp)"
-  event_count: { node: counter }
+  event_count: { strategy: counter }
 ```
 
 The `a|b|c` **alternation** is the join mechanism — *"tell it where to find the value"* — so
 differently-shaped events co-key into the same session.
 
-**Merge nodes:** `latest_by` (greatest comparator) · `keyed_map` (grow-only map of `latest_by`) · `last` · `once` (write-once) · `counter`.
+**Merge strategies:**
+
+| strategy | rule |
+|---|---|
+| `latest_by` | keep the one payload with the greatest `comparator` (argmax) |
+| `grouped_map` | grow-only map; each key gets its own `latest_by` slot |
+| `last_seen` | keep the last value by arrival order (no comparator) |
+| `write_once` | first meaningful value; sticky across restart/replay |
+| `counter` | sum; contributes +1 per admitted record |
+
 **DSL** (in `when`/`key`/`comparator`/`payload`): paths + `== != < <= > >= && || !` and builtins `parse_time, meaningful, bucket, round, trim, lower, coalesce, latest, first, list, get, lookup, parse_json, count, if, sum, filter, min, max`.
 `latest`/`first` optionally take a second `'field'` (`latest(map, 'created_at')`) to rank by that payload field instead of the stored comparator.
 

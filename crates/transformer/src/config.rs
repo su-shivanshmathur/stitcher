@@ -16,7 +16,7 @@ use stitcher::state::config::Program;
 struct TransformDoc {
     /// Bumped on every transform-logic change (audited).
     version: i64,
-    #[serde(default)]
+    #[serde(default, rename = "streams")]
     stream: Vec<StreamDoc>,
 }
 
@@ -35,9 +35,9 @@ struct StreamDoc {
     explode: Option<String>,
     #[serde(default)]
     common: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, rename = "columns")]
     fields: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, rename = "each")]
     element: BTreeMap<String, String>,
     #[serde(default)]
     key: Option<String>,
@@ -49,6 +49,7 @@ struct RetentionDoc {
     days: i64,
     /// Row timestamp field (epoch seconds); must be creation-time-immutable so a row's
     /// −1/+1 pair always ships or is suppressed together.
+    #[serde(rename = "timestamp_field")]
     key: String,
 }
 
@@ -116,7 +117,7 @@ fn unique_stream_names(streams: &[StreamDoc]) -> Result<(), String> {
         .map_or(Ok(()), Err)
 }
 
-/// A structural defect in a stream's shape (`fields` vs `explode`/`element`, retention bounds).
+/// A structural defect in a stream's shape (`columns` vs `explode`/`each`, retention bounds).
 #[derive(Clone, Copy)]
 enum StreamShapeError {
     FieldsWithExplode,
@@ -130,9 +131,9 @@ impl StreamShapeError {
     fn message(self) -> &'static str {
         match self {
             Self::FieldsWithExplode => {
-                "use either `fields` (one row) or `explode` + `element` (per-entry rows)"
+                "use either `columns` (one row) or `explode` + `each` (per-entry rows)"
             }
-            Self::ElementWithoutExplode => "`element` requires `explode`",
+            Self::ElementWithoutExplode => "`each` requires `explode`",
             Self::BadRetention => "retention.days must be > 0 and retention.key non-empty",
             Self::EmptyTopic => "topic must be non-empty",
             Self::SignFlagReserved => {

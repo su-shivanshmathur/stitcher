@@ -106,7 +106,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   DWK["ConfigProcessor::decode_with_key(raw)<br/>crates/stitcher/src/state/interp.rs"]
-  DWK --> A["admit(record)<br/>require paths · reject_if_contains · log_type_in · tenant<br/>(each via first-present |-alternation)"]
+  DWK --> A["admit(record)<br/>require paths · reject_if_contains · event_type_in · tenant<br/>(each via first-present |-alternation)"]
   A --> K["key_of(record)<br/>fill primary_key holes (|-alternation)"]
   K --> BS["build_state(record)<br/>for each field → build_field()"]
   BS --> BF["build_field(field, record)<br/>gate on when; latest_by/keyed_map/last/once/counter"]
