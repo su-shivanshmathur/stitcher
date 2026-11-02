@@ -13,8 +13,9 @@ pub struct Schema {
     pub id_type: String,
     /// Key template with `{log.path}` holes; `|` alternatives resolve first-present.
     pub primary_key: String,
-    #[serde(default)]
+    #[serde(default, rename = "accept")]
     pub decode_filter: DecodeFilter,
+    #[serde(rename = "state")]
     pub fields: BTreeMap<String, Field>,
 }
 
@@ -27,19 +28,20 @@ pub struct DecodeFilter {
     /// Reject records whose required string fields contain this substring.
     #[serde(default)]
     pub reject_if_contains: Option<String>,
-    /// Allowed `log_type` values (read from `log_type_path`).
-    #[serde(default)]
+    /// Allowed event-type values (read from `event_type_path`).
+    #[serde(default, rename = "event_type_in")]
     pub log_type_in: Vec<String>,
-    /// Path `log_type` is read from (default `log_type`).
+    /// Path the event type is read from (default `log_type`).
+    #[serde(rename = "event_type_path")]
     pub log_type_path: Option<String>,
     /// Tenant id path (compared against processor `tenant_ids`; default `log.tenant_id`).
     pub tenant_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "node", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "strategy", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Field {
-    /// Keep payload with the max comparator.
+    /// Keep the one payload with the maximum `comparator` (argmax by epoch nanos).
     LatestBy {
         when: Option<String>,
         /// Coerced to epoch nanos.
@@ -48,18 +50,21 @@ pub enum Field {
         #[serde(default)]
         payload: Option<String>,
     },
-    /// Map with per-key merged values; absent key → insert (maps only grow).
+    /// Growing map: each key gets its own `latest_by` slot; absent key → insert (maps only grow).
+    #[serde(rename = "grouped_map")]
     KeyedMap {
         when: Option<String>,
         /// Meaningful-only.
         key: String,
         value: Box<Self>,
     },
-    /// Keep the rightmost meaningful value.
+    /// Last value by arrival order (no comparator; overwrites on every admitted record).
+    #[serde(rename = "last_seen")]
     Last { when: Option<String>, value: String },
-    /// Write-once: keeps the first meaningful value; persisted, so stable across restarts.
+    /// First meaningful value, sticky across restart/replay (write-once).
+    #[serde(rename = "write_once")]
     Once { when: Option<String>, value: String },
-    /// `Sum` counter; contributes 1 per admitted record.
+    /// Sum counter; contributes +1 per admitted record.
     Counter { when: Option<String> },
     /// Nested mergeable struct.
     Nested { fields: BTreeMap<String, Self> },

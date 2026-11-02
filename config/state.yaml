@@ -8,52 +8,52 @@ id_type: device_site
 # per hole, so unmatched coverage drops records at keying after passing
 # admission).
 primary_key: "{device_id|log.device_id}-{site_id|log.site_id}"
-decode_filter:
+accept:
   require: [device_id|log.device_id, site_id|log.site_id]
   reject_if_contains: undefined
   # discriminator read first-present-wins: lifecycle events carry `log_type`,
   # command events carry `api_flow` — both feed the same device session.
-  log_type_in: [device_profile, reading, status_change, alert, ProvisionDevice, Reboot]
-  log_type_path: "log_type|api_flow|flow"
+  event_type_in: [device_profile, reading, status_change, alert, ProvisionDevice, Reboot]
+  event_type_path: "log_type|api_flow|flow"
   # org sits under `log` on lifecycle events, top-level on command events.
   tenant_path: "log.org_id|org_id"
-fields:
+state:
   device_profile:
-    node: latest_by
+    strategy: latest_by   # argmax: keep the payload with the greatest comparator
     when: "log_type == 'device_profile'"
     comparator: "parse_time(log.modified_at)"
     payload: "log"
   reading_object:
-    node: keyed_map
+    strategy: grouped_map   # growing map: each reading_id gets its own latest_by slot
     when: "log_type == 'reading'"
     key: "meaningful(log.reading_id)"
     value:
-      node: latest_by
+      strategy: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
   status_change_object:
-    node: keyed_map
+    strategy: grouped_map   # growing map: each change_id gets its own latest_by slot
     when: "log_type == 'status_change'"
     key: "meaningful(log.change_id)"
     value:
-      node: latest_by
+      strategy: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
   alert_object:
-    node: keyed_map
+    strategy: grouped_map   # growing map: each alert_id gets its own latest_by slot
     when: "log_type == 'alert'"
     key: "meaningful(log.alert_id)"
     value:
-      node: latest_by
+      strategy: latest_by
       comparator: "parse_time(log.modified_at)"
       payload: "log"
   command_event_object:
-    node: keyed_map
+    strategy: grouped_map   # growing map: keyed by creation timestamp, covers multiple flow types
     when: "api_flow == 'ProvisionDevice' || flow == 'Reboot'"
     key: "meaningful(created_at_timestamp)"
     value:
-      node: latest_by
+      strategy: latest_by
       comparator: "parse_time(created_at_timestamp)"
       # payload omitted ⇒ defaults to `$` (the whole event, stored as sent)
   event_count:
-    node: counter
+    strategy: counter   # sum: +1 per admitted record

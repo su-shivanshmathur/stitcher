@@ -49,7 +49,7 @@ impl ContradictReason {
                 "reaches past a scalar (counter/comparator) which has no sub-fields"
             }
             Self::BadEnvelopeKey => {
-                "a latest_by/keyed_map entry stores only `comparator` and `payload`"
+                "a latest_by/grouped_map entry stores only `comparator` and `payload`"
             }
             Self::EachOutsideExplode => {
                 "`each` is valid only in an explode stream's per-row expressions (not the gate)"
@@ -59,10 +59,10 @@ impl ContradictReason {
                 "`$` resolves to null in a transformer; root at `state` instead"
             }
             Self::ReduceNotMap => {
-                "latest()/first()/list() require a `state.<keyed_map>` path argument"
+                "latest()/first()/list() require a `state.<grouped_map>` path argument"
             }
             Self::NotCollection => {
-                "requires a `state.<keyed_map>` path or a collection-producing call (list/filter/parse_json/get/coalesce/if)"
+                "requires a `state.<grouped_map>` path or a collection-producing call (list/filter/parse_json/get/coalesce/if)"
             }
             Self::DynamicBuiltinArg => {
                 "must be a string literal (a dynamic value can't be validated at boot)"
@@ -86,7 +86,7 @@ impl LintReason {
     fn describe(self) -> &'static str {
         match self {
             Self::LiteralMapKey => {
-                "indexes a keyed_map by a literal key; use latest()/first()/list() or `explode`"
+                "indexes a grouped_map by a literal key; use latest()/first()/list() or `explode`"
             }
             Self::EnrichmentDependentGate => {
                 "reads enrichment (lookup); a gate verdict must be time-stable — it is recomputed for the OLD state on later transitions, so a hot-reloaded map could flip it retroactively and strand the emitted row"
@@ -268,7 +268,7 @@ fn findings(
     }
 }
 
-/// Reductions need a keyed_map path; `get`/`lookup` keys need string literals; everything
+/// Reductions need a grouped_map path; `get`/`lookup` keys need string literals; everything
 /// else recurses.
 fn call_findings(
     builtin: Builtin,
@@ -340,7 +340,7 @@ fn call_findings(
 }
 
 /// Validates a collection argument for `count`/`sum`/`filter`/`min`/`max`:
-/// a keyed_map path is fine; `filter`/`list`/`parse_json`/`get`/`coalesce`/`if` call results are
+/// a grouped_map path is fine; `filter`/`list`/`parse_json`/`get`/`coalesce`/`if` call results are
 /// treated as opaque collections (their args are recursed); everything else is a shape error.
 fn collection_arg_findings(
     coll: &Expr,
@@ -379,8 +379,8 @@ fn collection_arg_findings(
     }
 }
 
-/// `latest`/`first`/`list` reduce a `state.<keyed_map>`. Otherwise (proven or merely opaque)
-/// a non-keyed-map path is a shape error — an opaque payload interior like
+/// `latest`/`first`/`list` reduce a `state.<grouped_map>`. Otherwise (proven or merely opaque)
+/// a non-grouped-map path is a shape error — an opaque payload interior like
 /// `latest(state.f.payload.items)` is still not a map.
 fn reduce_findings(args: &[Expr], exploding: bool, program: &Program) -> Vec<Finding> {
     match args {
@@ -597,13 +597,13 @@ fn is_keyed_map_path(path: &str, program: &Program) -> bool {
         .is_some_and(|field| matches!(field, FieldProg::KeyedMap { .. }))
 }
 
-/// Why an `explode` target is invalid (it must be a single `state.<keyed_map>` path).
+/// Why an `explode` target is invalid (it must be a single `state.<grouped_map>` path).
 enum ExplodeError<'a> {
     /// Not a single `state.<field>` path expression.
     NotSingleStatePath,
     /// Names a field the schema doesn't have.
     UnknownField(&'a str),
-    /// Names a field that isn't a `keyed_map`.
+    /// Names a field that isn't a `grouped_map`.
     NotKeyedMap(&'a str),
 }
 
@@ -614,7 +614,7 @@ impl ExplodeError<'_> {
             Self::UnknownField(field) => {
                 format!("explode references unknown state field {field:?}")
             }
-            Self::NotKeyedMap(field) => format!("explode field {field:?} must be a keyed_map"),
+            Self::NotKeyedMap(field) => format!("explode field {field:?} must be a grouped_map"),
         }
     }
 }
