@@ -169,8 +169,19 @@ impl CompiledStream {
         // emit and retract can shift the −1's fields (known limit).
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
+        let (new_key, old_key) = match (self.key_of(&new_scope), self.key_of(&old_scope)) {
+            (Ok(nk), Ok(ok)) => (nk, ok),
+            _ => {
+                tracing::warn!(
+                    stream = %self.name,
+                    row_id,
+                    "configured key: evaluated to non-scalar or empty; record suppressed"
+                );
+                return Vec::new();
+            }
+        };
         // A key-only change is NOT a no-op: the old key needs its −1, the new key its +1.
-        if old_fields == new_fields && self.key_of(&old_scope) == self.key_of(&new_scope) {
+        if old_fields == new_fields && old_key == new_key {
             return Vec::new(); // unchanged row: a cancelling pair ≡ silence
         }
         let new_payload = self.stamp_sign(new_fields, Sign::Plus);
@@ -186,12 +197,12 @@ impl CompiledStream {
             ctx,
             Sign::Minus,
             row_id,
-            self.key_of(&old_scope),
+            old_key,
             old_bytes,
             &new_bytes,
         );
         // emit self-correlates on its own content
-        let emit = self.out_msg_self(ctx, Sign::Plus, row_id, self.key_of(&new_scope), new_bytes);
+        let emit = self.out_msg_self(ctx, Sign::Plus, row_id, new_key, new_bytes);
         vec![retract, emit]
     }
 
@@ -217,10 +228,21 @@ impl CompiledStream {
         row_id: &str,
         scope: &StateScope<'_>,
     ) -> Option<OutMsg> {
+        let key = match self.key_of(scope) {
+            Ok(k) => k,
+            Err(()) => {
+                tracing::warn!(
+                    stream = %self.name,
+                    row_id,
+                    "configured key: evaluated to non-scalar or empty; record suppressed"
+                );
+                return None;
+            }
+        };
         // serialize once; reuse bytes for both the id hash and the owned payload field
         self.passes_retention(payload, ctx.now_secs).then(|| {
             let bytes = serialize(payload);
-            self.out_msg_self(ctx, sign, row_id, self.key_of(scope), bytes)
+            self.out_msg_self(ctx, sign, row_id, key, bytes)
         })
     }
 
@@ -258,12 +280,16 @@ impl CompiledStream {
         Value::Object(fields)
     }
 
-    /// Projected Kafka key (empty when the stream has no `key`).
-    fn key_of(&self, cx: &StateScope<'_>) -> String {
-        self.key
-            .as_ref()
-            .and_then(|key| builtins::key_string(&eval::eval(key, cx)))
-            .unwrap_or_default()
+    /// Projected Kafka key. `None` when the stream has no `key:` config (intentional empty key).
+    /// `Err` when a configured key expr evaluates to a non-scalar or empty string — the caller
+    /// must not produce that record silently.
+    fn key_of(&self, cx: &StateScope<'_>) -> Result<String, ()> {
+        match &self.key {
+            None => Ok(String::new()),
+            Some(key_expr) => {
+                builtins::key_string(&eval::eval(key_expr, cx)).ok_or(())
+            }
+        }
     }
 
     /// The 7 stable parts plus row-specific content.

@@ -99,7 +99,7 @@ impl Enrichment {
         let initial = Self::load_file(&cfg.config_file)?;
         // the boot contract IS the reload contract: boot tables must be retained
         let boot_tables = Self::table_names_of(&initial).map_err(|e| {
-            error_stack::report!(StitcherError::Enrichment(format!(
+            error_stack::Report::new(StitcherError::Enrichment(format!(
                 "enrichment file {}: {e}",
                 cfg.config_file
             )))
@@ -170,7 +170,7 @@ impl Enrichment {
         }
         let map = Self::load_file(&cfg.config_file)?;
         Self::table_names_of(&map).map(Some).map_err(|e| {
-            error_stack::report!(StitcherError::Enrichment(format!(
+            error_stack::Report::new(StitcherError::Enrichment(format!(
                 "enrichment file {}: {e}",
                 cfg.config_file
             )))

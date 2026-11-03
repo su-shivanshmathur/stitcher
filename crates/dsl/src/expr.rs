@@ -126,11 +126,13 @@ pub enum Builtin {
     Min,
     /// `max(coll, 'field')` — greatest numeric field over the collection.
     Max,
+    /// `concat(a, b, …)` — concatenate ≥ 2 args as strings; null/absent args contribute `""`.
+    Concat,
 }
 
 impl Builtin {
     /// Every builtin — the single source for name/arity lookups and diagnostics.
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 20] = [
         Self::ParseTime,
         Self::Meaningful,
         Self::Bucket,
@@ -150,6 +152,7 @@ impl Builtin {
         Self::Filter,
         Self::Min,
         Self::Max,
+        Self::Concat,
     ];
 
     #[must_use]
@@ -174,6 +177,7 @@ impl Builtin {
             Self::Filter => "filter",
             Self::Min => "min",
             Self::Max => "max",
+            Self::Concat => "concat",
         }
     }
 
@@ -197,6 +201,7 @@ impl Builtin {
             | Self::Min
             | Self::Max => Arity::Exact(2),
             Self::If | Self::Filter => Arity::Exact(3),
+            Self::Concat => Arity::Range { min: 2, max: usize::MAX },
         }
     }
 }

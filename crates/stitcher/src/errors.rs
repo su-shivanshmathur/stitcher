@@ -30,4 +30,4 @@ pub enum StitcherError {
     ShutdownTimeout,
 }
 
-pub type StitcherResult<T> = error_stack::Result<T, StitcherError>;
+pub type StitcherResult<T> = Result<T, error_stack::Report<StitcherError>>;

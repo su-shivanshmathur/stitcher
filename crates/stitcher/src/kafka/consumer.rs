@@ -218,7 +218,7 @@ impl KafkaConsumer {
                 }
             }
         }
-        Err(error_stack::report!(StitcherError::Kafka(format!(
+        Err(error_stack::Report::new(StitcherError::Kafka(format!(
             "offset commit failed after {COMMIT_RETRIES} attempts: {}",
             last_err.unwrap_or_default()
         ))))

@@ -76,7 +76,7 @@ pub fn load(
         "loaded transformer config"
     );
     compile(doc, program, tables)
-        .map_err(|e| error_stack::report!(StitcherError::Config(format!("{}: {e}", ctx()))))
+        .map_err(|e| error_stack::Report::new(StitcherError::Config(format!("{}: {e}", ctx()))))
 }
 
 fn compile(

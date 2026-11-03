@@ -16,7 +16,7 @@ pub struct TelemetryGuard(pub WorkerGuard);
 
 pub fn init(cfg: &LogCfg, inspect_events: bool) -> StitcherResult<TelemetryGuard> {
     let filter = EnvFilter::try_new(filtering_directive(cfg, inspect_events))
-        .map_err(|e| error_stack::report!(StitcherError::Telemetry(e.to_string())))?;
+        .map_err(|e| error_stack::Report::new(StitcherError::Telemetry(e.to_string())))?;
     let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
     let init = match cfg.format {
         crate::config::LogFormat::Json => tracing_subscriber::registry()
@@ -28,8 +28,8 @@ pub fn init(cfg: &LogCfg, inspect_events: bool) -> StitcherResult<TelemetryGuard
             .with(fmt::layer().with_writer(writer))
             .try_init(),
     };
-    init.map_err(|e| error_stack::report!(StitcherError::Telemetry(e.to_string())))
-        .attach_printable("global subscriber already set")?;
+    init.map_err(|e| error_stack::Report::new(StitcherError::Telemetry(e.to_string())))
+        .attach("global subscriber already set")?;
     Ok(TelemetryGuard(guard))
 }
 

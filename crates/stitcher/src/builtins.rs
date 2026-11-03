@@ -161,6 +161,20 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     }
 }
 
+/// Concatenate args as strings; String → as-is, Number → canonical form, Bool → true/false,
+/// Null/absent → empty string (leniency matches `coalesce`).
+#[must_use]
+pub fn concat_values(args: &[Value]) -> String {
+    args.iter()
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null | Value::Array(_) | Value::Object(_) => String::new(),
+        })
+        .collect()
+}
+
 /// Meaningful strings pass, numbers stringify, else `None`.
 #[must_use]
 pub fn key_string(v: &Value) -> Option<String> {

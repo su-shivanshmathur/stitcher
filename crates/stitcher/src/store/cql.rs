@@ -31,7 +31,7 @@ fn validate_ident(kind: &str, ident: &str) -> StitcherResult<()> {
     if ok {
         Ok(())
     } else {
-        Err(error_stack::report!(StitcherError::Cql(format!(
+        Err(error_stack::Report::new(StitcherError::Cql(format!(
             "invalid {kind} identifier {ident:?} (allowed: [a-zA-Z0-9_])"
         ))))
     }
@@ -109,7 +109,7 @@ async fn prepare_quorum(session: &Session, cql: String) -> StitcherResult<Prepar
     let mut stmt = session
         .prepare(cql.clone())
         .await
-        .map_err(|e| error_stack::report!(StitcherError::Cql(format!("prepare {cql}: {e}"))))?;
+        .map_err(|e| error_stack::Report::new(StitcherError::Cql(format!("prepare {cql}: {e}"))))?;
     stmt.set_consistency(Consistency::Quorum);
     Ok(stmt)
 }
@@ -145,12 +145,12 @@ impl CqlStore {
             let mut rules = HashMap::new();
             for (from, to) in &cfg.address_translation {
                 let from: SocketAddr = from.parse().map_err(|e| {
-                    error_stack::report!(StitcherError::Cql(format!(
+                    error_stack::Report::new(StitcherError::Cql(format!(
                         "address_translation: invalid source {from:?}: {e}"
                     )))
                 })?;
                 let to: SocketAddr = to.parse().map_err(|e| {
-                    error_stack::report!(StitcherError::Cql(format!(
+                    error_stack::Report::new(StitcherError::Cql(format!(
                         "address_translation: invalid target {to:?}: {e}"
                     )))
                 })?;
@@ -160,7 +160,7 @@ impl CqlStore {
         }
 
         let session = builder.build().await.map_err(|e| {
-            error_stack::report!(StitcherError::Cql(format!(
+            error_stack::Report::new(StitcherError::Cql(format!(
                 "connect {}: {e}",
                 cfg.hosts.join(",")
             )))
@@ -170,7 +170,7 @@ impl CqlStore {
         session
             .query_unpaged("SELECT now() FROM system.local", ())
             .await
-            .map_err(|e| error_stack::report!(StitcherError::Cql(format!("health check: {e}"))))?;
+            .map_err(|e| error_stack::Report::new(StitcherError::Cql(format!("health check: {e}"))))?;
 
         let table = format!("{}.{}", cfg.keyspace, cfg.table);
         // Prefer the write-token statements (cross-writer detection); fall back to the plain
@@ -258,12 +258,12 @@ impl CqlStore {
                     Some(tracker) => rows
                         .rows::<(i64, Vec<u8>, Option<i64>)>()
                         .map_err(|e| {
-                            error_stack::report!(StitcherError::Cql(format!("typed rows: {e}")))
+                            error_stack::Report::new(StitcherError::Cql(format!("typed rows: {e}")))
                         })?
                         .next()
                         .transpose()
                         .map_err(|e| {
-                            error_stack::report!(StitcherError::Cql(format!("decode row: {e}")))
+                            error_stack::Report::new(StitcherError::Cql(format!("decode row: {e}")))
                         })?
                         .map(|(version, state, token)| {
                             tracker.observe_read(&key, token);
@@ -272,12 +272,12 @@ impl CqlStore {
                     None => rows
                         .rows::<(i64, Vec<u8>)>()
                         .map_err(|e| {
-                            error_stack::report!(StitcherError::Cql(format!("typed rows: {e}")))
+                            error_stack::Report::new(StitcherError::Cql(format!("typed rows: {e}")))
                         })?
                         .next()
                         .transpose()
                         .map_err(|e| {
-                            error_stack::report!(StitcherError::Cql(format!("decode row: {e}")))
+                            error_stack::Report::new(StitcherError::Cql(format!("decode row: {e}")))
                         })?
                         .map(|(version, state)| (key, (version, state))),
                 };
