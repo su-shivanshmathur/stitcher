@@ -57,12 +57,12 @@ clap           = { version = "4", features = ["derive"] }
 tracing              = "0.1"
 tracing-subscriber   = { version = "0.3", features = ["json", "env-filter", "fmt"] }
 tracing-appender     = "0.2"    # non-blocking writer (flush on shutdown via WorkerGuard)
-prometheus           = "0.13"   # the metrics stack (PLAN decision #22)
+prometheus           = "0.14"   # the metrics stack (PLAN decision #22)
 actix-web            = "4"
 
 # errors (PLAN §17: error_stack, NOT anyhow)
 thiserror    = "1"
-error-stack  = "0.4"
+error-stack  = "0.8"
 
 # misc
 arc-swap            = "1"

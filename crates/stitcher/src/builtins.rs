@@ -1,5 +1,7 @@
 //! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
+use std::fmt::Write;
+
 use serde_json::Value;
 use stitcher_dsl::TimeFormat;
 
@@ -158,6 +160,20 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     match (x.as_f64(), y.as_f64()) {
         (Some(xf), Some(yf)) => xf == yf,
         _ => false,
+    }
+}
+
+/// Append one arg's string form to `out`: String → as-is, Number → canonical form,
+/// Bool → true/false, Null/Array/Object → nothing (leniency matches `coalesce`). Borrows `v`,
+/// so discarded collections are never cloned.
+pub fn concat_onto(out: &mut String, v: &Value) {
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Number(n) => {
+            let _ = write!(out, "{n}"); // writing into a String never errors
+        }
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
     }
 }
 

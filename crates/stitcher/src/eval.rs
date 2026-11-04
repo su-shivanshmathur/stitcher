@@ -158,6 +158,13 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             f.as_str()
                 .map_or(Value::Null, |field| builtins::max_field(&c, field))
         }
+        (Builtin::Concat, args) => {
+            let mut out = String::new();
+            for arg in args {
+                builtins::concat_onto(&mut out, &eval(arg, cx));
+            }
+            Value::String(out)
+        }
         // arity is checked at compile/load time
         _ => Value::Null,
     }

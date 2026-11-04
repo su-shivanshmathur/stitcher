@@ -15,8 +15,8 @@ pub trait Merge {
     fn merge(self, newer: Self) -> Self;
 }
 
-/// Larger comparator wins; a tie keeps the newer. Serialized `{"comparator": …, "payload": …}`
-/// to byte-match stored v3 state.
+/// Larger comparator wins; a tie keeps the newer. Serializes as `{"comparator": …, "payload": …}`
+/// — field order is fixed by the custom `Serialize` on [`MergeValue`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatestBy<C: Ord, A> {
     pub comparator: C,

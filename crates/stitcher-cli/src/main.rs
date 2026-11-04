@@ -25,7 +25,7 @@ async fn run_pipeline(config_path: Option<&Path>, inspect: bool) -> stitcher::St
     tracing::debug!(startup_config = ?cfg, "effective config"); // secrets redacted by Debug
 
     let state_cfg = cfg.state.as_ref().ok_or_else(|| {
-        error_stack::report!(stitcher::StitcherError::Config(
+        error_stack::Report::new(stitcher::StitcherError::Config(
             "the stitcher binary requires [state] config_file (a state.yaml)".into()
         ))
     })?;
@@ -78,7 +78,7 @@ fn check_transformer(
     _transformer: &Path,
     _enrichment: Option<&Path>,
 ) -> stitcher::StitcherResult<()> {
-    Err(error_stack::report!(stitcher::StitcherError::Config(
+    Err(error_stack::Report::new(stitcher::StitcherError::Config(
         "check-transformer requires building with --features transform".into()
     )))
 }
