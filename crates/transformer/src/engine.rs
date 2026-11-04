@@ -169,13 +169,31 @@ impl CompiledStream {
         // emit and retract can shift the −1's fields (known limit).
         let old_scope = self.scope(old_state, old_element, ctx.enrichment);
         let old_fields = self.project(&old_scope);
+        // Key validity IS row visibility. An invalid key means that leg was never emittable, so
+        // invalid→valid surfaces the new row as a lone +1, valid→invalid retracts the surviving
+        // row with a lone −1, and invalid→invalid is silence. The single-leg helpers keep these
+        // transitions' retention and self-correlation identical to the grow-only / gate-close legs.
         let (new_key, old_key) = match (self.key_of(&new_scope), self.key_of(&old_scope)) {
             (Ok(nk), Ok(ok)) => (nk, ok),
-            _ => {
+            (Ok(_), Err(())) => {
+                let payload = self.stamp_sign(new_fields, Sign::Plus);
+                return self
+                    .emit_if_retained(&payload, ctx, Sign::Plus, row_id, &new_scope)
+                    .into_iter()
+                    .collect();
+            }
+            (Err(()), Ok(_)) => {
+                let payload = self.stamp_sign(old_fields, Sign::Minus);
+                return self
+                    .emit_if_retained(&payload, ctx, Sign::Minus, row_id, &old_scope)
+                    .into_iter()
+                    .collect();
+            }
+            (Err(()), Err(())) => {
                 tracing::warn!(
                     stream = %self.name,
                     row_id,
-                    "configured key: evaluated to non-scalar or empty; record suppressed"
+                    "configured key: both states evaluated to non-scalar or empty; record suppressed"
                 );
                 return Vec::new();
             }

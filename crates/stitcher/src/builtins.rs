@@ -1,5 +1,7 @@
 //! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
+use std::fmt::Write;
+
 use serde_json::Value;
 use stitcher_dsl::TimeFormat;
 
@@ -161,18 +163,18 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     }
 }
 
-/// Concatenate args as strings; String → as-is, Number → canonical form, Bool → true/false,
-/// Null/absent → empty string (leniency matches `coalesce`).
-#[must_use]
-pub fn concat_values(args: &[Value]) -> String {
-    args.iter()
-        .map(|v| match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null | Value::Array(_) | Value::Object(_) => String::new(),
-        })
-        .collect()
+/// Append one arg's string form to `out`: String → as-is, Number → canonical form,
+/// Bool → true/false, Null/Array/Object → nothing (leniency matches `coalesce`). Borrows `v`,
+/// so discarded collections are never cloned.
+pub fn concat_onto(out: &mut String, v: &Value) {
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Number(n) => {
+            let _ = write!(out, "{n}"); // writing into a String never errors
+        }
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
+    }
 }
 
 /// Meaningful strings pass, numbers stringify, else `None`.
