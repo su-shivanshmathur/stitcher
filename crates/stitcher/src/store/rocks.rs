@@ -153,7 +153,7 @@ impl RocksStore {
                 let column_family_name = self.state_column_family.clone();
                 spawn_blocking(move || -> StitcherResult<()> {
                     let column_family = db.cf_handle(&column_family_name).ok_or_else(|| {
-                        error_stack::report!(StitcherError::Rocks(format!(
+                        error_stack::Report::new(StitcherError::Rocks(format!(
                             "column family {column_family_name} missing"
                         )))
                     })?;
@@ -198,7 +198,7 @@ impl RocksStore {
                 let value = codec::frame(version, blob);
                 spawn_blocking(move || -> StitcherResult<()> {
                     let column_family = db.cf_handle(&column_family_name).ok_or_else(|| {
-                        error_stack::report!(StitcherError::Rocks(format!(
+                        error_stack::Report::new(StitcherError::Rocks(format!(
                             "column family {column_family_name} missing"
                         )))
                     })?;

@@ -27,7 +27,7 @@ pub fn spawn(
 ) -> StitcherResult<()> {
     let addr = format!("{host}:{port}");
     let listener = std::net::TcpListener::bind(&addr)
-        .map_err(|e| error_stack::report!(StitcherError::Telemetry(format!("bind {addr}: {e}"))))?;
+        .map_err(|e| error_stack::Report::new(StitcherError::Telemetry(format!("bind {addr}: {e}"))))?;
     if admin_api_key.is_none() {
         tracing::warn!("server.admin_api_key unset; GET /state will reject every request (401)");
     }
@@ -65,7 +65,7 @@ pub fn spawn(
             });
         })
         .map_err(|e| {
-            error_stack::report!(StitcherError::Telemetry(format!("spawn ops-http: {e}")))
+            error_stack::Report::new(StitcherError::Telemetry(format!("spawn ops-http: {e}")))
         })?;
     Ok(())
 }

@@ -163,6 +163,20 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     }
 }
 
+/// Append one arg's string form to `out`: String → as-is, Number → canonical form,
+/// Bool → true/false, Null/Array/Object → nothing (leniency matches `coalesce`). Borrows `v`,
+/// so discarded collections are never cloned.
+pub fn concat_onto(out: &mut String, v: &Value) {
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Number(n) => {
+            let _ = write!(out, "{n}"); // writing into a String never errors
+        }
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
+    }
+}
+
 /// Meaningful strings pass, numbers stringify, else `None`.
 #[must_use]
 pub fn key_string(v: &Value) -> Option<String> {

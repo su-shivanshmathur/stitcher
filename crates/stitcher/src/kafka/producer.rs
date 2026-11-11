@@ -63,7 +63,7 @@ impl KafkaProducer {
                 .payload(&msg.payload)
                 .headers(headers);
             let delivery = self.producer.send_result(record).map_err(|(e, _)| {
-                error_stack::report!(StitcherError::Kafka(format!("enqueue {}: {e}", msg.topic)))
+                error_stack::Report::new(StitcherError::Kafka(format!("enqueue {}: {e}", msg.topic)))
             })?;
             pending.push((msg.topic.clone(), delivery));
         }
@@ -71,14 +71,14 @@ impl KafkaProducer {
             tokio::time::timeout(self.delivery_timeout, delivery)
                 .await
                 .map_err(|_| {
-                    error_stack::report!(StitcherError::Kafka(format!(
+                    error_stack::Report::new(StitcherError::Kafka(format!(
                         "deliver {topic}: timed out after {:?}",
                         self.delivery_timeout
                     )))
                 })?
                 .change_context(StitcherError::Kafka("delivery channel".to_string()))?
                 .map_err(|(e, _msg)| {
-                    error_stack::report!(StitcherError::Kafka(format!("deliver {topic}: {e}")))
+                    error_stack::Report::new(StitcherError::Kafka(format!("deliver {topic}: {e}")))
                 })?;
             metrics::messages_produced(&topic);
         }
@@ -123,13 +123,13 @@ impl KafkaProducer {
             .headers(headers);
         let dlq = self.dlq_producer.as_ref().unwrap_or(&self.producer);
         let delivery = dlq.send_result(record).map_err(|(e, _)| {
-            error_stack::report!(StitcherError::Kafka(format!("dlq enqueue: {e}")))
+            error_stack::Report::new(StitcherError::Kafka(format!("dlq enqueue: {e}")))
         })?;
         delivery
             .await
             .change_context(StitcherError::Kafka("dlq delivery channel".to_string()))?
             .map_err(|(e, _)| {
-                error_stack::report!(StitcherError::Kafka(format!("dlq deliver: {e}")))
+                error_stack::Report::new(StitcherError::Kafka(format!("dlq deliver: {e}")))
             })?;
         metrics::dlq_produced("malformed");
         tracing::warn!(

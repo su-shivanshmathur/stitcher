@@ -434,7 +434,7 @@ impl Settings {
             .into_iter()
             .find_map(|(failed, msg)| failed.then_some(msg))
             .map_or(Ok(()), |msg| {
-                Err(error_stack::report!(StitcherError::Config(msg.to_string())))
+                Err(error_stack::Report::new(StitcherError::Config(msg.to_string())))
             })
     }
 }
@@ -466,13 +466,13 @@ pub fn load_with(
         )
         .build()
         .change_context(StitcherError::Config(ctx.to_string()))
-        .attach_printable_lazy(|| format!("RUN_ENV={run_env} config_dir={config_dir}"))?;
+        .attach_with(|| format!("RUN_ENV={run_env} config_dir={config_dir}"))?;
 
     let settings: Settings = serde_path_to_error::deserialize(
         raw.try_deserialize::<serde_json::Value>()
             .change_context(StitcherError::Config(ctx.to_string()))?,
     )
-    .map_err(|e| error_stack::report!(StitcherError::Config(format!("{ctx}: {e}"))))?;
+    .map_err(|e| error_stack::Report::new(StitcherError::Config(format!("{ctx}: {e}"))))?;
 
     let mut settings = settings;
     if inspect {

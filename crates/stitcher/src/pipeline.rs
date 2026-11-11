@@ -97,8 +97,8 @@ pub async fn run<P: Processor>(
                 if let Ok(r) = tokio::time::timeout(grace, work).await {
                     r
                 } else {
-                    return Err(error_stack::report!(StitcherError::ShutdownTimeout))
-                        .attach_printable("batch exceeded shutdown_grace_secs");
+                    return Err(error_stack::Report::new(StitcherError::ShutdownTimeout))
+                        .attach("batch exceeded shutdown_grace_secs");
                 }
             }
             None => work.await,
@@ -118,7 +118,7 @@ pub async fn run<P: Processor>(
 
     producer
         .flush(std::time::Duration::from_secs(10))
-        .attach_printable("producer flush on shutdown")?;
+        .attach("producer flush on shutdown")?;
     store.cleanup().await?;
     if ctx.dry_run {
         tracing::info!(

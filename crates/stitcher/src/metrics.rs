@@ -149,7 +149,7 @@ pub fn messages_consumed(topic: &str) {
 
 pub fn messages_decoded() {
     if let Some(counter) = &*MESSAGES_DECODED_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
@@ -173,13 +173,13 @@ pub fn dlq_produced(reason: &'static str) {
 
 pub fn states_merged() {
     if let Some(counter) = &*STATES_MERGED_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
 pub fn enrichment_reload_rejected() {
     if let Some(counter) = &*ENRICHMENT_RELOAD_REJECTED_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
@@ -197,25 +197,25 @@ pub fn errors_total(stage: &'static str) {
 
 pub fn batches() {
     if let Some(counter) = &*BATCHES_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
 pub fn cross_writer_conflict() {
     if let Some(counter) = &*CROSS_WRITER_CONFLICT_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
 pub fn cross_partition_key() {
     if let Some(counter) = &*CROSS_PARTITION_KEY_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
 pub fn partition_key_mismatch() {
     if let Some(counter) = &*PARTITION_KEY_MISMATCH_TOTAL {
-        counter.with_label_values(&[]).inc();
+        counter.with_label_values::<&str>(&[]).inc();
     }
 }
 
@@ -223,7 +223,7 @@ pub fn batch_size(record_count: usize) {
     if let Some(histogram) = &*BATCH_SIZE {
         #[allow(clippy::as_conversions)] // usize count → f64 observation; loss irrelevant
         let observation = record_count as f64;
-        histogram.with_label_values(&[]).observe(observation);
+        histogram.with_label_values::<&str>(&[]).observe(observation);
     }
 }
 
@@ -241,19 +241,19 @@ pub fn store_put_seconds(backend: &'static str, secs: f64) {
 
 pub fn produce_seconds(secs: f64) {
     if let Some(histogram) = &*PRODUCE_SECONDS {
-        histogram.with_label_values(&[]).observe(secs);
+        histogram.with_label_values::<&str>(&[]).observe(secs);
     }
 }
 
 pub fn batch_process_seconds(secs: f64) {
     if let Some(histogram) = &*BATCH_PROCESS_SECONDS {
-        histogram.with_label_values(&[]).observe(secs);
+        histogram.with_label_values::<&str>(&[]).observe(secs);
     }
 }
 
 pub fn end_to_end_lag_seconds(secs: f64) {
     if let Some(histogram) = &*END_TO_END_LAG_SECONDS {
-        histogram.with_label_values(&[]).observe(secs);
+        histogram.with_label_values::<&str>(&[]).observe(secs);
     }
 }
 

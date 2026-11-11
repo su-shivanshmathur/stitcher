@@ -78,12 +78,12 @@ pub fn load(path: &Path) -> StitcherResult<Program> {
     let ctx = || format!("load state config {}", path.display());
     let src = std::fs::read_to_string(path)
         .change_context(StitcherError::Config(ctx()))
-        .attach_printable_lazy(|| "state.config_file is unreadable".to_string())?;
+        .attach_with(|| "state.config_file is unreadable".to_string())?;
     let schema: model::Schema = serde_yaml_ng::from_str(&src)
         .change_context(StitcherError::Config(ctx()))
-        .attach_printable_lazy(|| "state.config_file is not a valid schema".to_string())?;
+        .attach_with(|| "state.config_file is not a valid schema".to_string())?;
     compile(&schema)
-        .map_err(|e| error_stack::report!(StitcherError::Config(format!("{}: {e}", ctx()))))
+        .map_err(|e| error_stack::Report::new(StitcherError::Config(format!("{}: {e}", ctx()))))
 }
 
 pub fn compile(schema: &model::Schema) -> Result<Program, String> {
