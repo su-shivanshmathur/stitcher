@@ -66,6 +66,8 @@ impl BinOp {
 pub enum Arity {
     Exact(usize),
     Range { min: usize, max: usize },
+    /// At least `min` arguments, no upper bound.
+    AtLeast(usize),
 }
 
 impl Arity {
@@ -74,6 +76,7 @@ impl Arity {
         match self {
             Self::Exact(k) => n == k,
             Self::Range { min, max } => n >= min && n <= max,
+            Self::AtLeast(min) => n >= min,
         }
     }
 
@@ -82,6 +85,7 @@ impl Arity {
         match self {
             Self::Exact(k) => format!("{k}"),
             Self::Range { min, max } => format!("{min}–{max}"),
+            Self::AtLeast(min) => format!("{min}+"),
         }
     }
 }
@@ -126,11 +130,15 @@ pub enum Builtin {
     Min,
     /// `max(coll, 'field')` — greatest numeric field over the collection.
     Max,
+    /// `concat(a, b, ...)` — variadic string join; ≥2 args, stringify each.
+    Concat,
+    /// `count_distinct(coll, 'field')` — distinct non-null field values over the collection.
+    CountDistinct,
 }
 
 impl Builtin {
     /// Every builtin — the single source for name/arity lookups and diagnostics.
-    const ALL: [Self; 19] = [
+    const ALL: [Self; 21] = [
         Self::ParseTime,
         Self::Meaningful,
         Self::Bucket,
@@ -150,6 +158,8 @@ impl Builtin {
         Self::Filter,
         Self::Min,
         Self::Max,
+        Self::Concat,
+        Self::CountDistinct,
     ];
 
     #[must_use]
@@ -174,6 +184,8 @@ impl Builtin {
             Self::Filter => "filter",
             Self::Min => "min",
             Self::Max => "max",
+            Self::Concat => "concat",
+            Self::CountDistinct => "count_distinct",
         }
     }
 
@@ -197,6 +209,8 @@ impl Builtin {
             | Self::Min
             | Self::Max => Arity::Exact(2),
             Self::If | Self::Filter => Arity::Exact(3),
+            Self::Concat => Arity::AtLeast(2),
+            Self::CountDistinct => Arity::Exact(2),
         }
     }
 }

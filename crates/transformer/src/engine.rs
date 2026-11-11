@@ -3,8 +3,11 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
+use serde::Deserialize;
 use serde_json::Value;
 use stitcher_dsl::expr::Expr;
+
+use crate::constants::MILLIS_PER_SECOND;
 
 use super::expr::StateScope;
 use stitcher::{
@@ -15,6 +18,25 @@ use stitcher::{
     projection::{Projection, ProjectionContext},
 };
 
+/// Unit of a retention `timestamp_field`; defaults to `Seconds` for back-compat.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimestampUnit {
+    #[default]
+    Seconds,
+    Millis,
+}
+
+impl TimestampUnit {
+    /// Normalize a raw timestamp value to epoch-seconds.
+    pub fn to_seconds(self, value: i64) -> i64 {
+        match self {
+            Self::Seconds => value,
+            Self::Millis => value / MILLIS_PER_SECOND,
+        }
+    }
+}
+
 pub struct Transform {
     streams: Vec<CompiledStream>,
 }
@@ -22,7 +44,9 @@ pub struct Transform {
 /// Per-stream retention window (epoch-seconds timestamp field + max age in days).
 pub(super) struct Retention {
     pub days: i64,
+    /// Row timestamp field; `unit` declares its epoch granularity.
     pub key: String,
+    pub unit: TimestampUnit,
 }
 
 pub(super) struct CompiledStream {
@@ -364,6 +388,7 @@ impl CompiledStream {
         self.retention.as_ref().is_none_or(|retention| {
             json_util::get_path(payload, &retention.key)
                 .and_then(json_util::as_i64)
+                .map(|raw| retention.unit.to_seconds(raw))
                 .is_none_or(|secs| filters::within_retention(secs, retention.days, now_secs))
         })
     }

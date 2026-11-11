@@ -1,5 +1,7 @@
 //! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
+use std::collections::HashSet;
+
 use serde_json::Value;
 use stitcher_dsl::TimeFormat;
 
@@ -369,4 +371,32 @@ pub fn min_field(coll: &Value, field: &str) -> Value {
 #[must_use]
 pub fn max_field(coll: &Value, field: &str) -> Value {
     rank_by_field(coll, field, true).map_or(Value::Null, |(_, field_value)| field_value)
+}
+
+/// Stringify a single value for `concat`: string as-is, number → text, everything else → `""`.
+/// Intentionally does NOT filter out `"unknown"` / `""` — concat is structural, not semantic.
+#[must_use]
+pub fn concat_stringify(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `count_distinct(coll, field)`: count of distinct non-null `field` values over the collection.
+/// Skips entries where the field is missing or `Null`.
+#[must_use]
+pub fn count_distinct(coll: &Value, field: &str) -> Value {
+    let distinct: HashSet<String> = iter_payloads(coll)
+        .into_iter()
+        .filter_map(|item| {
+            let field_value = get_field(item, field);
+            match field_value {
+                Value::Null => None,
+                other => Some(other.to_string()),
+            }
+        })
+        .collect();
+    Value::from(i64::try_from(distinct.len()).unwrap_or(i64::MAX))
 }

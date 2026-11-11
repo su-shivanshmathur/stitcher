@@ -158,6 +158,19 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             f.as_str()
                 .map_or(Value::Null, |field| builtins::max_field(&c, field))
         }
+        (Builtin::Concat, args) => {
+            let joined: String = args
+                .iter()
+                .map(|arg| builtins::concat_stringify(&eval(arg, cx)))
+                .collect();
+            Value::String(joined)
+        }
+        (Builtin::CountDistinct, [coll, field]) => {
+            let c = eval(coll, cx);
+            let f = eval(field, cx);
+            f.as_str()
+                .map_or(Value::Null, |field| builtins::count_distinct(&c, field))
+        }
         // arity is checked at compile/load time
         _ => Value::Null,
     }
