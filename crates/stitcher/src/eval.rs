@@ -158,13 +158,10 @@ fn apply_builtin<'a, C: EvalContext<'a>>(builtin: Builtin, args: &[Expr], cx: &C
             f.as_str()
                 .map_or(Value::Null, |field| builtins::max_field(&c, field))
         }
-        (Builtin::Concat, args) => {
-            let joined: String = args
-                .iter()
-                .map(|arg| builtins::concat_stringify(&eval(arg, cx)))
-                .collect();
-            Value::String(joined)
-        }
+        (Builtin::Concat, args) => Value::String(args.iter().fold(String::new(), |mut joined, arg| {
+            builtins::append_concat_part(&mut joined, &eval(arg, cx));
+            joined
+        })),
         (Builtin::CountDistinct, [coll, field]) => {
             let c = eval(coll, cx);
             let f = eval(field, cx);
