@@ -12,6 +12,9 @@ target
 # Plan files
 *.md
 
+# Local-only test configs/envs (payment, session, …); never pushed
+local_testing/
+
 # Local agent memory bank (context for Claude/subagents; never pushed)
 memory-bank/
 

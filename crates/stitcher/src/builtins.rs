@@ -1,6 +1,6 @@
 //! DSL runtime built-ins, used by the shared evaluator ([`crate::eval`]).
 
-use std::fmt::Write;
+use std::collections::HashSet;
 
 use serde_json::Value;
 use stitcher_dsl::TimeFormat;
@@ -163,19 +163,6 @@ fn num_eq(x: &serde_json::Number, y: &serde_json::Number) -> bool {
     }
 }
 
-/// Append one arg's string form to `out`: String → as-is, Number → canonical form,
-/// Bool → true/false, Null/Array/Object → nothing (leniency matches `coalesce`). Borrows `v`,
-/// so discarded collections are never cloned.
-pub fn concat_onto(out: &mut String, v: &Value) {
-    match v {
-        Value::String(s) => out.push_str(s),
-        Value::Number(n) => {
-            let _ = write!(out, "{n}"); // writing into a String never errors
-        }
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Null | Value::Array(_) | Value::Object(_) => {}
-    }
-}
 
 /// Meaningful strings pass, numbers stringify, else `None`.
 #[must_use]
@@ -385,4 +372,46 @@ pub fn min_field(coll: &Value, field: &str) -> Value {
 #[must_use]
 pub fn max_field(coll: &Value, field: &str) -> Value {
     rank_by_field(coll, field, true).map_or(Value::Null, |(_, field_value)| field_value)
+}
+
+/// Stringify a single value for `concat`: string as-is, number → text, bool → `"true"`/`"false"`,
+/// Null/Array/Object → `""`. Intentionally does NOT filter out `"unknown"` / `""`.
+#[must_use]
+pub fn concat_stringify(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null | Value::Array(_) | Value::Object(_) => String::new(),
+    }
+}
+
+/// Canonical dedup key honoring the DSL's numeric equality (`1` == `1.0`); `Null`/missing ⇒ skip.
+fn distinct_key(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Number(number) => Some(
+            number
+                .as_i64()
+                .map(|i| i.to_string())
+                .or_else(|| number.as_u64().map(|u| u.to_string()))
+                .unwrap_or_else(|| {
+                    number
+                        .as_f64()
+                        .map_or_else(String::new, |f| format!("{f}"))
+                }),
+        ),
+        other => Some(other.to_string()),
+    }
+}
+
+/// `count_distinct(coll, field)`: count of distinct non-null `field` values over the collection.
+/// Numeric equality mirrors the DSL (`1` and `1.0` are the same key). Skips `Null`/missing.
+#[must_use]
+pub fn count_distinct(coll: &Value, field: &str) -> Value {
+    let distinct: HashSet<String> = iter_payloads(coll)
+        .into_iter()
+        .filter_map(|item| distinct_key(&get_field(item, field)))
+        .collect();
+    Value::from(i64::try_from(distinct.len()).unwrap_or(i64::MAX))
 }

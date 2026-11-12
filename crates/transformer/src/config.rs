@@ -7,7 +7,7 @@ use error_stack::ResultExt;
 use serde::Deserialize;
 use stitcher_dsl::expr::{self, Expr};
 
-use super::engine::{CompiledStream, Retention, Transform};
+use super::engine::{CompiledStream, Retention, TimestampUnit, Transform};
 use stitcher::errors::{StitcherError, StitcherResult};
 use stitcher::state::config::Program;
 
@@ -47,10 +47,13 @@ struct StreamDoc {
 #[serde(deny_unknown_fields)]
 struct RetentionDoc {
     days: i64,
-    /// Row timestamp field (epoch seconds); must be creation-time-immutable so a row's
-    /// −1/+1 pair always ships or is suppressed together.
+    /// Row timestamp field; must be creation-time-immutable so a row's −1/+1 pair always ships or
+    /// is suppressed together. Epoch granularity declared by `unit` (default: seconds).
     #[serde(rename = "timestamp_field")]
     key: String,
+    /// Epoch granularity of `timestamp_field`; absent ⇒ seconds (back-compat).
+    #[serde(default)]
+    unit: TimestampUnit,
 }
 
 const fn default_true() -> bool {
@@ -188,6 +191,7 @@ fn compile_stream(
                 retention: doc.retention.map(|r| Retention {
                     days: r.days,
                     key: r.key,
+                    unit: r.unit,
                 }),
                 explode: compile_opt(&doc.explode).map_err(&err)?,
                 common: compile_fields(&doc.common).map_err(&err)?,

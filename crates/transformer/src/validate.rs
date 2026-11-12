@@ -301,7 +301,7 @@ fn call_findings(
             [coll] => collection_arg_findings(coll, exploding, program, tables),
             _ => Vec::new(),
         },
-        Builtin::Sum | Builtin::Min | Builtin::Max => match args {
+        Builtin::Sum | Builtin::Min | Builtin::Max | Builtin::CountDistinct => match args {
             [coll, field] => {
                 let field_error = (!matches!(field, Expr::Str(_))).then(|| {
                     Finding::new(

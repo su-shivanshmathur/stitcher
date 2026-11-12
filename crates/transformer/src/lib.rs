@@ -2,6 +2,7 @@
 //! [`stitcher::Projection`], validated against the state schema at load.
 
 mod config;
+mod constants;
 mod engine;
 mod expr;
 mod validate;
