@@ -374,19 +374,22 @@ pub fn max_field(coll: &Value, field: &str) -> Value {
     rank_by_field(coll, field, true).map_or(Value::Null, |(_, field_value)| field_value)
 }
 
-/// Stringify a single value for `concat`: string as-is, number → text, bool → `"true"`/`"false"`,
-/// Null/Array/Object → `""`. Intentionally does NOT filter out `"unknown"` / `""`.
-#[must_use]
-pub fn concat_stringify(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null | Value::Array(_) | Value::Object(_) => String::new(),
+/// Append a single `concat` part into `out`: string as-is, number → text, bool → `"true"`/`"false"`,
+/// Null/Array/Object → nothing. Structural (by value kind), NOT `meaningful`-filtered; keeps the
+/// common string/bool path allocation-free.
+pub fn append_concat_part(out: &mut String, value: &Value) {
+    match value {
+        Value::String(s) => out.push_str(s),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Null | Value::Array(_) | Value::Object(_) => {}
     }
 }
 
-/// Canonical dedup key honoring the DSL's numeric equality (`1` == `1.0`); `Null`/missing ⇒ skip.
+/// Distinct by canonical exact value: whole floats render in integer form, signed zero normalized
+/// (`0`/`0.0`/`-0.0` share a key). Exact-integer IDs are kept distinct rather than collapsed into
+/// nearby f64 values the way `num_eq`'s f64 fallback would, so distinct-ID counts never under-count —
+/// a deliberate divergence from `num_eq` only at the >2^53 int-vs-float boundary. `Null`/missing ⇒ skip.
 fn distinct_key(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,
@@ -396,9 +399,13 @@ fn distinct_key(value: &Value) -> Option<String> {
                 .map(|i| i.to_string())
                 .or_else(|| number.as_u64().map(|u| u.to_string()))
                 .unwrap_or_else(|| {
-                    number
-                        .as_f64()
-                        .map_or_else(String::new, |f| format!("{f}"))
+                    number.as_f64().map_or_else(String::new, |f| {
+                        if f == 0.0 {
+                            "0".to_string() // normalize -0.0 / 0.0
+                        } else {
+                            format!("{f}")
+                        }
+                    })
                 }),
         ),
         other => Some(other.to_string()),
@@ -406,7 +413,7 @@ fn distinct_key(value: &Value) -> Option<String> {
 }
 
 /// `count_distinct(coll, field)`: count of distinct non-null `field` values over the collection.
-/// Numeric equality mirrors the DSL (`1` and `1.0` are the same key). Skips `Null`/missing.
+/// Dedup keying per [`distinct_key`] (`1`/`1.0` share a key; exact-integer IDs kept distinct). Skips `Null`/missing.
 #[must_use]
 pub fn count_distinct(coll: &Value, field: &str) -> Value {
     let distinct: HashSet<String> = iter_payloads(coll)
